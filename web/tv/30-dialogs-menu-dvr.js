@@ -159,6 +159,8 @@ const MENU = [
       return S.favs.has(ch.number) ? `Remove ${ch.number} ${ch.name} from Favorites` : `★ Add ${ch.number} ${ch.name} to Favorites`;
     },
     act: () => { const ch = S.mode === "live" && curCh(); closeMenu(); if (ch) toggleFav(ch); else toast("Tune to a channel first"); } },
+  { get label() { return `Captions (CC): ${S.cc.on ? "On" : "Off"}`; }, live: true,
+    act: () => { closeMenu(); ccToggle(); } },
   { get label() {
       const ch = cuLive() && curCh();
       return `↺ Start this show over${ch ? ` (or a show from the last ${cuDaysText(ch).toLowerCase()} in the Guide)` : ""}`;
@@ -211,7 +213,7 @@ function openMenu() {
   hideBanner();
   const t = S.mode === "vod" && S.vod && S.vod.tracks;
   const avOn = (e) => !e.av || (t && (e.av === true || (e.av === "audio" ? t.audio.length > 1 : t.subs.length > 0)));
-  const items = MENU.filter((e) => avOn(e) && !(e.catchup && !cuLive()) && !(isPhone() && e.notPhone) && !(e.needsHome && !homeEnabled()) && !(e.homeOff && homeEnabled()) && featOn(e));
+  const items = MENU.filter((e) => avOn(e) && !(e.live && S.mode !== "live") && !(e.catchup && !cuLive()) && !(isPhone() && e.notPhone) && !(e.needsHome && !homeEnabled()) && !(e.homeOff && homeEnabled()) && featOn(e));
   menuShown = items.filter((e, i) => e.head === undefined || (items[i + 1] && items[i + 1].head === undefined));
   renderMenu();
   S.layer.push("menu"); $("menu").classList.remove("hidden", "two");

@@ -20,7 +20,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTe
 from fastapi.staticfiles import StaticFiles
 
 from . import bundle, config, connections, https, db, dvr, epg, gamestats, guide, hls, home, jobs, library, lineup, matcher, media, remote, scoreboard, sources, sports, tracks, vod
-from . import streaming, tuner
+from . import captions, streaming, tuner
 from .streaming import ffmpeg_stream, stop_client
 from . import reminders  # noqa: I001
 from . import catchup  # noqa: I001
@@ -212,6 +212,22 @@ async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", b
     if alt >= len(rows):
         raise HTTPException(404, "No more alternates")
     return await _hls(rows[alt], client, mode, buf)
+
+
+@app.get("/api/cc")
+def api_cc(client: str, after: int = 0):
+    """Live captions for the channel a screen is playing: {state, base, shifts, delay, cues: [[seq, pts_ms,
+    until_ms, lines, top, src, style]]}. A cue shows from (pts_ms - shifts[style] - base) on the screen's
+    video clock until the next one (or `until_ms`); `delay`: seconds behind live the screen should play.
+    state: cc (the broadcaster's), ai / ai-loading (speech-to-text), wait, none, hls, idle."""
+    return captions.poll(client, after)
+
+
+@app.post("/api/cc/hold")
+def api_cc_hold(client: str):
+    """The screen is about to re-open its channel to play further behind live (for captions): its tuner
+    stays a few seconds, so the provider connection and what the tuner kept aren't lost in between."""
+    return {"held": tuner.hold(client)}
 
 
 @app.get("/api/hls/s/{sid}/{name}")

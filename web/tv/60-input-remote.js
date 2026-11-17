@@ -6,7 +6,7 @@ const ACTIONS = [
   ["Enter", "OK / Select"], ["Back", "Back / Exit"],
   ["ChannelUp", "Channel up / Page up"], ["ChannelDown", "Channel down / Page down"],
   ["g", "Guide"], ["i", "Info"], ["m", "Menu"], ["l", "Last channel"],
-  ["*", "Favorite: add / remove"], ["v", "Favorites guide / show all"], ["c", "Guide: filter by genre"],
+  ["*", "Favorite: add / remove"], ["v", "Favorites guide / show all"], ["c", "Guide: filter by genre · Live TV: captions"], ["cc", "Captions on / off"],
   ["h", "Home"], ["r", "Record"], ["d", "Recordings (DVR)"], ["/", "Search"], ["t", "Sports & Events"], ["x", "Game stats"], ["o", "On Demand"],
   ["VolUp", "Volume up"], ["VolDown", "Volume down"], ["u", "Mute"],
   [" ", "Play / Pause"], ["s", "Stop playback"], ["f", "Full screen"], ["Power", "Power on / off"],
@@ -26,7 +26,7 @@ const DEFAULT_BINDINGS = {
   l: "l", LastNumberRedial: "l", ColorF2Yellow: "l",
   r: "r", MediaRecord: "r", ColorF0Red: "r",
   d: "d", DVR: "d",
-  "*": "*", a: "*", Favorites: "v", v: "v", c: "c",
+  "*": "*", a: "*", Favorites: "v", v: "v", c: "c", ClosedCaptionToggle: "cc", Subtitle: "cc",
   "/": "/", BrowserSearch: "/", Find: "/", F3: "/", t: "t", x: "x", o: "o",
   "+": "VolUp", "=": "VolUp", AudioVolumeUp: "VolUp",
   "-": "VolDown", "_": "VolDown", AudioVolumeDown: "VolDown",
@@ -266,6 +266,7 @@ function handleKey(k, ev) {
     case "t": openSports(); break;
     case "x": openStats(); break;
     case "o": openOD(); break;
+    case "c": case "cc": ccToggle(); break;
     case "r": {
       if (!dvrOn()) { toast(DVR_OFF, 5000); break; }
       const ch = curCh();

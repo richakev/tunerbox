@@ -8,9 +8,11 @@ RUN apt-get update \
 WORKDIR /app
 
 # requirements.txt stays the single source of truth; the desktop-window package is dropped here.
-COPY requirements.txt constraints.txt ./
+COPY requirements.txt requirements-whisper.txt constraints.txt ./
 RUN grep -vi pywebview requirements.txt > /tmp/requirements-server.txt \
     && pip install --no-cache-dir -r /tmp/requirements-server.txt -c constraints.txt
+# speech-to-text captions for channels without closed captions (optional: TunerBox runs without it)
+RUN pip install --no-cache-dir -r requirements-whisper.txt -c constraints.txt
 
 COPY tunerbox/ tunerbox/
 COPY web/ web/

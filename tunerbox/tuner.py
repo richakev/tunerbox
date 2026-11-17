@@ -30,15 +30,27 @@ VIDEO_TYPES = {0x01, 0x02, 0x10, 0x1B, 0x24, 0x42, 0xEA}   # MPEG-1/2, MPEG-4, H
 _tuners = []                                # running tuners
 _lock = threading.Lock()                    # guards _tuners; taken before a tuner's own lock
 _clients = {}                               # client id -> its Subscriber (one channel per screen)
+# client id -> (tuner, until): kept running a moment after that screen lets go, because it's coming
+# straight back to the same channel (captions: re-opened to play further behind live)
+_held = {}
 
 
 class Subscriber:
     """One reader of a tuner: a screen, an HLS session or a recording."""
 
-    def __init__(self, tuner, buffer, name):
-        self.tuner, self.name = tuner, name
+    def __init__(self, tuner, buffer, name, tap=False):
+        self.tuner, self.name, self.tap = tuner, name, tap
         self.q = queue.Queue(maxsize=QUEUE_CHUNKS + buffer * 40)
         self.wake = None                                   # set by an async reader
+        # the timestamp (ms) this reader's stream starts its player's clock from (captions.py)
+        self.base = None
+        self._bf = None if tap else _captions().BaseFinder()
+
+    def _note(self, chunk):
+        if self._bf is not None:
+            b = self._bf.feed(chunk)
+            if b is not None:
+                self.base, self._bf = (b if b >= 0 else None), None
 
     def put(self, chunk, wait=0):
         """From the tuner's thread. False when this reader has fallen too far behind. `wait`: seconds
@@ -50,6 +62,8 @@ class Subscriber:
                 self.q.put_nowait(chunk)
         except queue.Full:
             return False
+        if self._bf is not None:
+            self._note(chunk)
         if self.wake:
             self.wake()
         return True
@@ -83,6 +97,7 @@ class Tuner:
         self.source_id = source_id          # the playlist whose connection this uses (connections.py)
         self.retain = max(buffer, MIN_RETAIN)   # seconds of stream kept for viewers who join later
         self.subs = []
+        self.taps = []                      # readers that don't keep it running (captions.py)
         self.lock = threading.Lock()
         self.chunks = deque()               # (seq, arrival time, bytes); seqs are consecutive
         self.keys = deque()                 # (seq, time) of chunks that start at a video keyframe
@@ -115,10 +130,25 @@ class Tuner:
             seed = self._seed(buffer)
             if seed:
                 sub.q.put_nowait(seed)
+                sub._note(seed)
             self.subs.append(sub)
             n = len(self.subs)
         if n > 1:
             log.info("%s joined %s (%d on this tuner)", name or "viewer", split_url(self.url)[0][-40:], n)
+        return sub
+
+    def tap(self, name):
+        """A reader of everything kept and everything to come that doesn't count as a viewer: the
+        tuner stops when its last viewer leaves, whatever taps it has. One that falls behind misses data."""
+        sub = Subscriber(self, 0, name, tap=True)
+        with self.lock:
+            seed = self._seed(self.retain)
+            if seed:
+                sub.q.put_nowait(seed)
+            if self.ended:
+                sub.end()
+            else:
+                self.taps.append(sub)
         return sub
 
     def stop(self):
@@ -133,12 +163,23 @@ class Tuner:
         threading.Thread(target=kill, args=(self.proc,), daemon=True).start()
 
     def leave(self, sub, wait=True):
+        if sub.tap:
+            with self.lock:
+                if sub in self.taps:
+                    self.taps.remove(sub)
+            sub.end()
+            return
         with _lock:
             with self.lock:
                 if sub in self.subs:
                     self.subs.remove(sub)
                 last = not self.subs and not self.ended
-                if last:                    # nobody can join a tuner that's stopping
+                h = _held.get(sub.name)
+                if last and h and h[0] is self and h[1] > time.monotonic():
+                    # its screen is coming straight back: stop only if it doesn't
+                    threading.Timer(h[1] - time.monotonic(), self.let_go).start()
+                    last = False
+                elif last:                  # nobody can join a tuner that's stopping
                     self.ended = True
                     if self in _tuners:
                         _tuners.remove(self)
@@ -148,6 +189,17 @@ class Tuner:
                 kill(self.proc)
             else:                           # taskkill takes a moment: never make the server wait
                 threading.Thread(target=kill, args=(self.proc,), daemon=True).start()
+
+    def let_go(self):
+        """Stop a held tuner (see hold) if nobody came back to it."""
+        with _lock:
+            with self.lock:
+                if self.subs or self.ended:
+                    return
+                self.ended = True
+                if self in _tuners:
+                    _tuners.remove(self)
+        threading.Thread(target=kill, args=(self.proc,), daemon=True).start()
 
     def _seed(self, buffer):
         """PAT/PMT, then the kept stream from the newest keyframe at least `buffer` seconds old."""
@@ -215,6 +267,7 @@ class Tuner:
                 self.seq += 1
             self._trim(now)
             subs = list(self.subs)
+            taps = list(self.taps)
         self.sent += len(buf)
         # A viewer alone on its tuner slows the tuner down instead of being dropped, as before shared
         # tuners: at startup the guide refresh can starve the server just as the provider's first
@@ -224,6 +277,8 @@ class Tuner:
             if not s.put(buf, wait):
                 log.warning("%s fell too far behind on %s: dropped", s.name or "viewer", split_url(self.url)[0][-40:])
                 s.close()
+        for s in taps:
+            s.put(buf)
 
     def _trim(self, now):
         cutoff = now - self.retain
@@ -277,6 +332,8 @@ class Tuner:
             with self.lock:
                 self.ended = True
                 subs, self.subs = self.subs, []
+                subs += self.taps
+                self.taps = []
                 self.chunks.clear()
                 self.keys.clear()
         kill(self.proc)
@@ -351,12 +408,25 @@ def open_for(url, client_id=None, mode=None, audio="aac", buffer=None, source_id
     stopped, so a full playlist doesn't cost the screen what it was watching (join checks again).
     `name`: who it is for Setup › Tuners when there's no `client_id` (connections.app_reader)."""
     from . import connections, hls
+    h = _held.pop(client_id, None) if client_id else None
+    if h and h[0].url != url:               # held for a screen that went to another channel instead
+        h[0].let_go()
     connections.after_stop(client_id, url)
     connections.check(source_id, url, mode or config.get("video_mode", "copy"), audio, client_id or "")
+    # the same channel again (playing further behind live for captions, a reconnect): join its running
+    # tuner before letting go, so the provider connection - and what the tuner kept - isn't lost
+    old = _clients.get(client_id) if client_id else None
+    again = old is not None and old.tuner.url == url and not old.tuner.ended
     if client_id:
+        if again:
+            _clients.pop(client_id, None)
         streaming.stop_client(client_id)
         hls.stop_client(client_id)
-    sub = join(url, mode, audio, buffer, name=client_id or name, source_id=source_id)
+    try:
+        sub = join(url, mode, audio, buffer, name=client_id or name, source_id=source_id)
+    finally:
+        if again:
+            old.close(wait=False)
     if client_id:
         _clients[client_id] = sub
     return sub
@@ -400,6 +470,27 @@ def stop_id(tid):
     for t in ts:
         t.stop()
     return bool(ts)
+
+
+def hold(client_id, secs=8):
+    """The screen is about to re-open its channel (to play further behind live): keep its tuner, and the
+    provider connection, for `secs` after it lets go."""
+    sub = _clients.get(client_id)
+    if sub is not None and not sub.tuner.ended:
+        _held[client_id] = (sub.tuner, time.monotonic() + secs)
+        return True
+    return False
+
+
+def client_sub(client_id):
+    """The tuner reader a screen's live TS stream comes from, or None."""
+    sub = _clients.get(client_id)
+    return sub if sub is not None and not sub.tuner.ended else None
+
+
+def _captions():
+    from . import captions
+    return captions
 
 
 def stop_client(client_id):

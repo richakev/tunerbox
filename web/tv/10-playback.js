@@ -44,7 +44,7 @@ function bufSecs() {
   return isNaN(v) ? 0 : v;
 }
 function streamUrl(ch, alt, hls, mode = "") {
-  const b = `&buf=${bufSecs()}` + (mode ? `&mode=${mode}` : "");
+  const b = `&buf=${playBuf(ch)}` + (mode ? `&mode=${mode}` : "");
   if (ch.feed) return `${location.origin}/api/feed/${hls ? "hls" : "stream"}?key=${encodeURIComponent(ch.feed)}&client=${CID}${b}`;
   return `${location.origin}/api/${hls ? "hls" : "stream"}/${ch.number}?alt=${alt}&client=${CID}${b}`;
 }
@@ -181,7 +181,7 @@ function play(ch, alt, onFail, again) {
     const pr = p.play();
     if (pr && pr.catch) pr.catch((e) => { if (e && e.name === "NotAllowedError" && S.player === p) showTapPlay(); });
   };
-  const secs = bufSecs();
+  const secs = playBuf(ch);
   if (secs > 0) {
     fillCache(p, secs, start);
     // ran dry (provider hiccup): wait for a part of the cache to come back instead of stuttering

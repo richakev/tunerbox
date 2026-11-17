@@ -1,0 +1,4 @@
+# Optional: speech-to-text captions for live channels that carry no closed captions (tunerbox/captions.py).
+# The Docker image installs it; from source: pip install -r requirements-whisper.txt
+# The model (~150 MB for base.en) is downloaded into the data folder the first time it's needed.
+faster-whisper>=1.0

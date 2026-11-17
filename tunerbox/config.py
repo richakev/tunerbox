@@ -122,6 +122,11 @@ DEFAULTS = {
     # Extra stream cache in seconds (0 = fastest channel changes). Each TV screen can override it
     # in its Menu. Also keeps a read-ahead buffer on the server so a slow Wi-Fi viewer never stalls the provider.
     "stream_buffer": 0,
+    # Live TV captions (Menu › Captions): channels without the broadcaster's captions get speech-to-text
+    # from their audio instead, when faster-whisper is installed (it is in the Docker image). The model
+    # is downloaded into the data folder the first time: tiny.en, base.en (default), small.en (better, slower)
+    "cc_ai": True,
+    "cc_ai_model": "base.en",
     # Turn a TV screen off after this many hours without a button press (0 = never), and show a
     # screensaver this many minutes after it's off (0 = never). Neither happens while a recording
     # is running or a phone remote is open.

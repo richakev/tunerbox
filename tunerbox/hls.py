@@ -54,6 +54,11 @@ def stop_client(client):
         _stop(sid)
 
 
+def live_client(client):
+    """True while `client` plays a live channel or feed over HLS."""
+    return any(s["client"] == client and s.get("sub") for s in list(_sessions.values()))
+
+
 def stop_all():
     for sid in list(_sessions):
         _stop(sid)
