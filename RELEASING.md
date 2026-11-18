@@ -37,6 +37,7 @@ git push -u origin main
 The tag sets the version: the workflow runs `python packaging/set_version.py 1.4.1` before building. To keep the file in the repo matching, run the same command yourself before tagging and commit the result.
 
 A test build without a release: push to `main` or `testing`, or **Actions › Build & release › Run workflow**. The files are under the run's **Artifacts**.
+Branch builds use the highest numeric release tag, with or without a `v` prefix; two-component tags such as `1.6` become `1.6.0`.
 
 ## The builds list
 
