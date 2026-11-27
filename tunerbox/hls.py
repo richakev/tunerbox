@@ -95,7 +95,7 @@ def start(raw_url, client=None, mode=None, buffer=None, pre=(), label="", source
             if not pre:         # a channel or feed: share its tuner (tuner.join checks the limit)
                 sub = tuner.join(raw_url, mode, "aac", buffer, name=f"hls:{client or sid}", source_id=source_id)
             elif source_id is not None:     # On Demand: a connection of its own
-                connections.check(source_id, client=client or "")
+                connections.check(source_id, client=client or "", move=False)
             proc = subprocess.Popen(_cmd(None if sub else raw_url, mode, buffer, pre, audio), cwd=d,
                                     stdin=subprocess.PIPE if sub else subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.PIPE, creationflags=NO_WINDOW)

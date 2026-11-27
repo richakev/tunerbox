@@ -1212,12 +1212,12 @@ def peek(version_id, force=False, client="", again=False):
         from . import library
         return out() if library.measure_one(version_id) else failed("Couldn't read it from the NAS (see Setup › Log)")
     try:
-        connections.check(t["source_id"])                     # never at the cost of something playing
+        connections.check(t["source_id"], move=False)         # never at the cost of something playing
     except connections.Full:                                  # not remembered: tried again next time
         try:
             if not client or not config.get("vod_details_pause", True):
                 raise
-            connections.check(t["source_id"], client=client)  # free but for this screen's own stream?
+            connections.check(t["source_id"], client=client, move=False)  # free but for this screen's own stream?
         except connections.Full:
             return out(NO_CONNECTION)
         return {**out("This screen is using the playlist's connection"), "mine": True}

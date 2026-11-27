@@ -25,6 +25,7 @@ MAX_BACKLOG = 64_000_000                    # most stream kept per tuner for vie
 MIN_RETAIN = 10                             # seconds always kept, so a cache can fill at once
 QUEUE_CHUNKS = 256                          # per reader: 16 MB and up, rides out Wi-Fi hiccups
 ALONE_WAIT = 30                             # seconds a tuner waits for its only reader before dropping it
+MOVE_WAIT = 6                               # seconds another playlist's copy has to send data before a move gives up
 VIDEO_TYPES = {0x01, 0x02, 0x10, 0x1B, 0x24, 0x42, 0xEA}   # MPEG-1/2, MPEG-4, H.264, HEVC, AVS, VC-1
 
 _tuners = []                                # running tuners
@@ -80,14 +81,18 @@ class Subscriber:
 
 class Tuner:
     parent = None                           # a Subscriber on the tuner this one converts (see __init__)
+    playing = None                          # the address ffmpeg plays, when not `url` (see __init__)
 
     def __init__(self, url, mode, audio, buffer, source_id=None, parent=None):
-        self.url, self.mode, self.audio = url, mode, audio
+        self.url, self.mode, self.audio = url, mode, audio     # url: what it was opened for, kept after a move
+        self.playing = url                  # what ffmpeg plays now: another playlist's copy after a move
         self.source_id = source_id          # the playlist whose connection this uses (connections.py)
         # parent: a Subscriber on another tuner of the same stream. This one converts what that one
         # sends (a Roku's 720p from a browser's original) instead of opening a second provider connection
         self.parent = parent
         self.retain = max(buffer, MIN_RETAIN)   # seconds of stream kept for viewers who join later
+        self.buffer = buffer
+        self.moves = 0                      # times it moved to another playlist's copy (move)
         self.subs = []
         self.lock = threading.Lock()
         self.chunks = deque()               # (seq, arrival time, bytes); seqs are consecutive
@@ -106,11 +111,11 @@ class Tuner:
         self.proc = track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                            stdin=subprocess.PIPE if parent else subprocess.DEVNULL,
                                            creationflags=NO_WINDOW, bufsize=0))
-        self._errt = threading.Thread(target=self._stderr, daemon=True)
+        self._errt = threading.Thread(target=self._stderr, args=(self.proc, self.err), daemon=True)
         self._errt.start()
         if parent:
             threading.Thread(target=self._pipe_in, daemon=True).start()
-        threading.Thread(target=self._read, daemon=True).start()
+        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
         log.info("Tuner start (%s, %s)%s: %s", mode, audio,
                  f" from the {parent.tuner.mode} tuner already open, no new connection" if parent else "",
                  split_url(url)[0][-60:])
@@ -182,11 +187,58 @@ class Tuner:
         return b"".join(psi + body)
 
     # ------------------------------------------------------------ ffmpeg output
-    def _stderr(self):
+    def _stderr(self, proc, err):
         try:
-            self.err.extend(self.proc.stderr.read().decode("utf-8", "ignore").splitlines()[-5:])
+            err.extend(proc.stderr.read().decode("utf-8", "ignore").splitlines()[-5:])
         except (OSError, ValueError):
             pass
+
+    def move(self, url, source_id, wait=None):
+        """Play the same channel from another playlist's copy (`url`) without dropping anyone on it, to
+        free this playlist's connection (connections.move_to_free). The new copy is opened first and
+        only taken once it sends data; then the old one is closed. Viewers keep their connection to
+        TunerBox and see a jump of a second or two. False (nothing changed) when the copy sends nothing."""
+        if self.parent is not None or self.ended:
+            return False
+        err = []
+        proc = track(subprocess.Popen(live_cmd(url, self.mode, self.audio, self.buffer), stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, bufsize=0))
+        errt = threading.Thread(target=self._stderr, args=(proc, err), daemon=True)
+        errt.start()
+        first = queue.Queue()
+
+        def peek():
+            try:
+                first.put(proc.stdout.read(65536))
+            except (OSError, ValueError):
+                first.put(b"")
+        threading.Thread(target=peek, daemon=True).start()
+        try:
+            data = first.get(timeout=MOVE_WAIT if wait is None else wait)
+        except queue.Empty:
+            data = b""
+        old = None
+        if data:
+            with _lock:
+                with self.lock:
+                    if not self.ended:
+                        old, self.proc, self._errt = self.proc, proc, errt
+                        self.playing, self.source_id, self.err = url, source_id, err
+                        # joiners get the new copy only: its own keyframes and PAT/PMT
+                        self.chunks.clear()
+                        self.keys.clear()
+                        self.size = 0
+                        self.psi, self.pmt_pids, self.video_pid = {}, set(), None
+                        self.moves += 1
+        if old is None:
+            threading.Thread(target=kill, args=(proc,), daemon=True).start()
+            if not data:
+                log.warning("Couldn't move to %s: no data (%s)", split_url(url)[0][-60:], " | ".join(err) or "no error given")
+            return False
+        threading.Thread(target=self._read, args=(proc, data), daemon=True).start()
+        threading.Thread(target=kill, args=(old,), daemon=True).start()     # its reader then stops quietly
+        log.info("Tuner moved to %s", split_url(url)[0][-60:])
+        return True
 
     def _pipe_in(self):
         """A converting tuner: hand ffmpeg what the parent tuner sends. Its end ends this one too."""
@@ -206,11 +258,13 @@ class Tuner:
         except OSError:
             pass
 
-    def _read(self):
+    def _read(self, proc, first=b""):
+        """Feed what `proc` (this tuner's ffmpeg) sends to the viewers. `first`: already read (move)."""
         carry = b""
         try:
             while True:
-                data = self.proc.stdout.read(65536)
+                data = first or proc.stdout.read(65536)
+                first = b""
                 if not data:
                     break
                 data = carry + data
@@ -218,27 +272,42 @@ class Tuner:
                     data = _resync(data)
                 n = len(data) - len(data) % TS
                 carry = data[n:]
-                if n:
-                    self._feed(data[:n])
+                if n and not self._feed(data[:n], proc):
+                    break
         except (OSError, ValueError):       # pipe closed under us (ffmpeg killed)
             pass
+        with self.lock:                     # decided under the lock, so a move can't swap in between
+            moved = proc is not self.proc
+            if not moved:
+                self.ended = True           # no move can take it over now (move checks ended)
+        if moved:                           # moved to another playlist's copy: that one goes on
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            return
         self._end()
 
-    def _feed(self, buf):
-        cuts = []
-        vp = self.video_pid
-        for off in range(0, len(buf), TS):
-            b1 = buf[off + 1]
-            pid = ((b1 & 0x1F) << 8) | buf[off + 2]
-            if pid == vp:
-                # start of a PES with the random-access flag: ffmpeg marks video keyframes this way
-                if b1 & 0x40 and buf[off + 3] & 0x20 and buf[off + 4] and buf[off + 5] & 0x40:
-                    cuts.append(off)
-            elif pid == 0 or pid in self.pmt_pids:
-                self._psi(pid, buf[off:off + TS])
-                vp = self.video_pid
+    def _feed(self, buf, proc=None):
+        """False when `proc` isn't this tuner's ffmpeg any more (it moved): nothing is sent."""
         now = time.monotonic()
         with self.lock:
+            # Checked before PAT/PMT are read, so the old copy's last chunk can't put its PIDs back
+            # after a move cleared them
+            if proc is not None and proc is not self.proc:
+                return False
+            cuts = []
+            vp = self.video_pid
+            for off in range(0, len(buf), TS):
+                b1 = buf[off + 1]
+                pid = ((b1 & 0x1F) << 8) | buf[off + 2]
+                if pid == vp:
+                    # start of a PES with the random-access flag: ffmpeg marks video keyframes this way
+                    if b1 & 0x40 and buf[off + 3] & 0x20 and buf[off + 4] and buf[off + 5] & 0x40:
+                        cuts.append(off)
+                elif pid == 0 or pid in self.pmt_pids:
+                    self._psi(pid, buf[off:off + TS])
+                    vp = self.video_pid
             bounds = sorted({0, *cuts, len(buf)})
             for a, b in zip(bounds, bounds[1:]):
                 if a in cuts:
@@ -257,6 +326,7 @@ class Tuner:
             if not s.put(buf, wait):
                 log.warning("%s fell too far behind on %s: dropped", _who(s.name), split_url(self.url)[0][-40:])
                 s.close(why="fell too far behind (network too slow?)")
+        return True
 
     def _trim(self, now):
         cutoff = now - self.retain
@@ -374,7 +444,7 @@ def _find(url, mode, audio, any_mode):
     sharing beats a second connection); `any_mode` (the DVR) takes whatever video mode is running."""
     best = None
     for t in _tuners:
-        if t.url != url or t.ended or (t.audio != audio and t.audio != "aac"):
+        if url not in (t.url, t.playing) or t.ended or (t.audio != audio and t.audio != "aac"):
             continue
         if t.mode == mode and t.audio == audio:
             return t
@@ -387,7 +457,7 @@ def _parent_for(url):
     """A running tuner of `url` that a converting tuner can read from: the original stream first."""
     if url.startswith("media:"):            # local channels use no connection: nothing to save
         return None
-    ts = [t for t in _tuners if t.url == url and not t.ended and t.parent is None]
+    ts = [t for t in _tuners if url in (t.url, t.playing) and not t.ended and t.parent is None]
     return min(ts, key=lambda t: t.mode != "copy", default=None)
 
 
@@ -408,6 +478,13 @@ def join(url, mode=None, audio="aac", buffer=0, any_mode=False, name="", source_
     mode = mode or config.get("video_mode", "copy")
     buffer = buffer_seconds(buffer)
     client = name[4:] if name.startswith("hls:") else name
+    # A full playlist may move a channel elsewhere first (connections.move_to_free). Not under admit:
+    # trying another playlist's copy can take seconds, and every other tune would wait for it.
+    if source_id is not None and not sharing(url, mode, audio, any_mode):
+        try:
+            connections.check(source_id, None, client=client)
+        except connections.Full:
+            pass                                # decided below, under admit (make_room for a recording)
     # Check and start under connections.admit, so nobody else can take the room in between. That
     # includes a viewer that make_room stopped, whose screen tunes again at once.
     with connections.admit:
@@ -422,7 +499,7 @@ def join(url, mode=None, audio="aac", buffer=0, any_mode=False, name="", source_
         derive = parent if parent is not None and parent.mode == "copy" else None
         for attempt in range(0 if derive is not None else 3):
             try:    # outside _lock: counting what's in use takes it. url=None: a new connection
-                connections.check(source_id, None, client=client)
+                connections.check(source_id, None, client=client, move=False)
                 break
             except connections.Full:
                 if parent is not None:
@@ -469,7 +546,7 @@ def sharing(url, mode=None, audio="aac", any_mode=False):
 def evict(url, mode, audio):
     """Stop the running tuner for `url` (to free its connection). True if there was one."""
     with _lock:
-        ts = [t for t in _tuners if t.url == url and t.mode == mode and t.audio == audio and not t.ended]
+        ts = [t for t in _tuners if url in (t.url, t.playing) and t.mode == mode and t.audio == audio and not t.ended]
     for t in ts:
         t.stop("stopped to free the connection for a recording")
     return bool(ts)
@@ -496,9 +573,16 @@ def running():
         for k in via.get(id(t), ()):
             with k.lock:
                 names += [s.name for s in k.subs]
-        out.append({"id": id(t), "url": t.url, "mode": t.mode, "audio": t.audio, "viewers": names, "source_id": t.source_id,
+        out.append({"id": id(t), "url": t.url, "playing": t.playing or t.url, "mode": t.mode, "audio": t.audio, "viewers": names, "source_id": t.source_id,
                     "since": int(t.started), "mb": round(t.sent / 1e6, 1)})
     return out
+
+
+def move_id(tid, url, source_id):
+    """Move running tuner `tid` (an id from running()) to another playlist's copy of its channel. True if it moved."""
+    with _lock:
+        t = next((t for t in _tuners if id(t) == tid and not t.ended and t.parent is None), None)
+    return bool(t) and t.move(url, source_id)
 
 
 def stop_id(tid):

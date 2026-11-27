@@ -3,6 +3,10 @@ feed, shared by every screen, Plex and the DVR on it) and each On Demand title b
 connection. Shown next to each playlist's connection limit, so "No Signal" on a full Xtream account can
 be explained. Provider addresses hold logins, so nothing here returns a URL.
 
+When a playlist is full, a channel another screen is watching on it may also be on a playlist that
+has room: that tuner is moved there (move_to_free) so the new stream can start. Everyone on it stays
+on, with a jump of a second or two. Recordings are never moved.
+
 It also enforces each playlist's limit: starting one more connection than the account allows is
 refused up front (`Full`), so the screen can say what is using the connections instead of showing No
 Signal after the provider turns it away. A recording that's starting may take a connection from live
@@ -21,6 +25,11 @@ log = logging.getLogger("tunerbox.connections")
 # connection freed for a recording can't be taken back by the screen that lost it. Taken before
 # tuner._lock, hls._lock and streaming._lock, never after.
 admit = threading.RLock()
+
+# A move being tried (move_to_free), both guarded by admit: the tuners being moved, and the connections
+# held on other playlists for the copies being tried, so nobody takes that room during the try
+_moving = set()
+_reserved = {}
 
 
 class Full(Exception):
@@ -68,7 +77,7 @@ def _mine(client):
 def used(source_id, client=""):
     """Connections a playlist has open. `client`'s own streams don't count: tuning stops them first."""
     mine = _mine(client)
-    n = 0
+    n = _reserved.get(source_id, 0)
     for t in tuner.running():
         if t.get("source_id") == source_id and not (mine and t["viewers"] and set(t["viewers"]) <= mine):
             n += 1
@@ -78,9 +87,10 @@ def used(source_id, client=""):
     return n
 
 
-def check(source_id, url=None, mode=None, audio="aac", client="", any_mode=False):
+def check(source_id, url=None, mode=None, audio="aac", client="", any_mode=False, move=True):
     """Raise Full if opening `url` needs a connection its playlist doesn't have. Joining a tuner that's
-    already running on it is free. `url=None`: always a new connection (On Demand)."""
+    already running on it is free. `url=None`: always a new connection (On Demand). A full playlist
+    first tries to move a channel to another playlist (move_to_free), unless `move` is False."""
     src = _source(source_id)
     lim = limit_of(src) if src else 0
     if not lim:
@@ -88,8 +98,102 @@ def check(source_id, url=None, mode=None, audio="aac", client="", any_mode=False
     if url and tuner.sharing(url, mode, audio, any_mode):
         return
     n = used(source_id, client)
+    if n >= lim and move and move_to_free(source_id, client):
+        n = used(source_id, client)
     if n >= lim:
         raise Full(src, n, lim)
+
+
+def auto_move():
+    return bool(config.get("conn_auto_move", True))
+
+
+def _room(source_id):
+    """Can one more connection open on this playlist? (Enabled, and under its limit or with none.)"""
+    src = _source(source_id)
+    if not src or not src["enabled"]:
+        return False
+    lim = limit_of(src)
+    return not lim or used(source_id) < lim
+
+
+def _copies(url, source_id, mode):
+    """Other playlists' copies of the channel or feed playing from `url`, in the order a screen tries
+    them: stream rows on a playlist other than `source_id`, not dead, and playable in `mode`."""
+    st = db.one("SELECT key FROM streams WHERE url=? AND source_id=?", (url, source_id)) \
+        or db.one("SELECT key FROM streams WHERE url=?", (url,))
+    if not st:
+        return []
+    keys = next((c["streams"] for c in guide.channels(True) if st["key"] in (c.get("streams") or ())), None)
+    out = []
+    for r in guide.stream_rows(keys or [st["key"]]):
+        if (r["url"] == url or not r.get("source_id") or r["source_id"] == source_id or r.get("status") == "dead"
+                or r["url"].startswith("media:")):
+            continue
+        if r.get("video_mode") and r["video_mode"] != mode:
+            continue                    # that playlist plays in another format: viewers would get a different picture
+        out.append(r)
+    return out
+
+
+def _held():
+    """Does this thread hold admit already (a caller up the stack)?"""
+    owned = getattr(admit, "_is_owned", None)
+    return bool(owned and owned())
+
+
+def _pick(source_id, mine, skip):
+    """(tuner, copy) to try next for move_to_free, or None. Call with admit held."""
+    ts = tuner.running()
+    cands = [t for t in ts if t.get("source_id") == source_id and t["id"] not in skip and t["id"] not in _moving
+             and not any(v.startswith("dvr:") for v in t["viewers"])
+             and not (mine and t["viewers"] and set(t["viewers"]) <= mine)]
+    for t in sorted(cands, key=lambda t: (len(t["viewers"]), -t["since"])):
+        busy = {u for o in ts if o["id"] != t["id"] for u in (o["url"], o["playing"])}
+        for r in _copies(t["playing"], source_id, t["mode"]):
+            if r["url"] in busy or not _room(r["source_id"]):
+                continue
+            return t, r                 # only its first usable copy: the next is likely no better
+    return None
+
+
+def move_to_free(source_id, client="", why=""):
+    """Free a connection on a full playlist by moving a channel someone else is watching on it to
+    another playlist's copy of that channel, where there's room. The tuner with the fewest viewers
+    goes first; never one a recording is on, and never `client`'s own (it stops when `client` tunes).
+    Setup › Settings › Playback can turn it off. True when one moved.
+
+    The tuner and the other playlist's room are chosen and held under admit, but the try itself (up to
+    tuner.MOVE_WAIT for the copy's first data) runs without it, so other tunes don't wait. So it does
+    nothing when called with admit held: callers check without it first (tuner.open_for, hls.start)."""
+    if not auto_move() or _held():
+        return False
+    mine, skip = _mine(client), set()
+    for _ in range(3):                  # each try can wait a few seconds for a copy that sends nothing
+        with admit:
+            pick = _pick(source_id, mine, skip)
+            if pick is None:
+                return False
+            t, r = pick
+            _moving.add(t["id"])
+            _reserved[r["source_id"]] = _reserved.get(r["source_id"], 0) + 1
+        try:
+            ok = tuner.move_id(t["id"], r["url"], r["source_id"])
+        finally:
+            with admit:
+                _moving.discard(t["id"])
+                left = _reserved.get(r["source_id"], 1) - 1
+                if left > 0:
+                    _reserved[r["source_id"]] = left
+                else:
+                    _reserved.pop(r["source_id"], None)
+        if ok:
+            to = (_source(r["source_id"]) or {}).get("name", "another playlist")
+            log.info("Connection limit: moved %s on playlist %s to %s to free a connection%s",
+                     r["name"], source_id, to, f" for {client_name(client)}" if client else (f" for {why}" if why else ""))
+            return True
+        skip.add(t["id"])               # that tuner's copy sent nothing: try another tuner
+    return False
 
 
 def live_used(source_id):

@@ -124,6 +124,9 @@ DEFAULTS = {
     # when a playlist has no connection left, a recording that's starting takes one from live TV
     # (that screen is told what's recording and offered that channel instead)
     "dvr_takes_connection": True,
+    # when a playlist has no connection left, a channel another screen is watching on it moves to
+    # another playlist's copy of that channel (where there's room), so the new stream can start
+    "conn_auto_move": True,
     # Extra stream cache in seconds (0 = fastest channel changes). Each TV screen can override it
     # in its Menu. Also keeps a read-ahead buffer on the server so a slow Wi-Fi viewer never stalls the provider.
     "stream_buffer": 0,

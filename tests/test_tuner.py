@@ -550,3 +550,186 @@ def test_tuners_list_shows_a_converted_copy_as_viewers_of_the_original(fake):
     tv.close()
     assert tuner.running()[0]["viewers"] == ["roku"]
     roku.close()
+
+
+# ------------------------------------------------------------ moving a channel to free a connection
+CNN_A, CNN_B, ESPN_A = "fake:1000:0.05:0", "fake:1000:0.05:1", "fake:1000:0.05:2"
+
+
+@pytest.fixture
+def two_playlists(fake):
+    """A and B each allow one connection. CNN is on both (A first); ESPN is only on A."""
+    import json
+
+    from tunerbox import db, guide
+    a, b = _account(1), _account(1)
+    for key, sid, url in (("cnn-a", a, CNN_A), ("cnn-b", b, CNN_B), ("espn-a", a, ESPN_A)):
+        db.run("INSERT INTO streams(key, source_id, name, url) VALUES (?, ?, ?, ?)", (key, sid, key, url))
+    for num, name, main, alts in ((1, "CNN", "cnn-a", ["cnn-b"]), (2, "ESPN", "espn-a", [])):
+        db.run("INSERT INTO lineup(number, name) VALUES (?, ?)", (num, name))
+        db.run("INSERT INTO mappings(number, stream_key, alt_keys, mode) VALUES (?, ?, ?, 'manual')",
+               (num, main, json.dumps(alts)))
+    guide.invalidate()
+    return a, b
+
+
+def test_full_playlist_moves_another_screens_channel_to_a_playlist_with_room(two_playlists, fake):
+    a, b = two_playlists
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    assert _read(tv1, 20000)
+    t, old = tv1.tuner, tv1.tuner.proc
+    tv2 = tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)         # A is full: CNN moves to B
+    assert t.url == CNN_A and t.playing == CNN_B and t.source_id == b and t.moves == 1 and not t.ended
+    assert [u for u, *_ in fake] == [CNN_A, CNN_B, ESPN_A]
+    old.wait(5)                                                     # A's copy is closed
+    assert _read(tv1, 20000) and _read(tv2, 20000)                  # both screens play
+    assert sorted((r["source_id"], r["viewers"]) for r in tuner.running()) == [(a, ["tv2"]), (b, ["tv1"])]
+    tv1.close(); tv2.close()
+
+
+def test_a_moved_channel_starts_joiners_on_the_new_copy(two_playlists, fake):
+    a, b = two_playlists
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    assert _read(tv1, 20000)
+    tv2 = tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)
+    tv3 = tuner.open_for(CNN_B, "tv3", "copy", source_id=b)          # joins the moved tuner: no new connection
+    assert tv3.tuner is tv1.tuner and len(fake) == 3
+    pk = _packets(_read(tv3, 188 * 30))
+    assert _pid(pk[0]) == 0                                         # PAT first, from the new copy
+    for s in (tv1, tv2, tv3):
+        s.close()
+
+
+def test_recording_moves_live_tv_instead_of_stopping_it(two_playlists, fake):
+    a, b = two_playlists
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    assert _read(tv1, 20000)
+    rec = tuner.join(ESPN_A, "copy", any_mode=True, name="dvr:7", source_id=a, take=True)
+    assert not tv1.tuner.ended and tv1.tuner.source_id == b and rec.tuner.source_id == a
+    rec.close(); tv1.close()
+
+
+def test_a_channel_a_recording_is_on_never_moves(two_playlists):
+    from tunerbox.connections import Full
+    a, b = two_playlists
+    rec = tuner.join(CNN_A, "copy", any_mode=True, name="dvr:3", source_id=a, take=True)
+    tv1 = tuner.join(CNN_A, "copy", name="tv1", source_id=a)
+    with pytest.raises(Full):
+        tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)
+    assert rec.tuner.playing == CNN_A and rec.tuner.moves == 0
+    rec.close(); tv1.close()
+
+
+def test_no_move_when_the_other_playlist_is_full_too(two_playlists):
+    from tunerbox.connections import Full
+    a, b = two_playlists
+    other = tuner.join("fake:1000:0.05:3", "copy", name="tv9", source_id=b)     # B's one connection
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    with pytest.raises(Full):
+        tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)
+    assert tv1.tuner.playing == CNN_A
+    other.close(); tv1.close()
+
+
+def test_no_move_when_turned_off(two_playlists):
+    from tunerbox import config
+    from tunerbox.connections import Full
+    a, b = two_playlists
+    config.update({"conn_auto_move": False})
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    with pytest.raises(Full):
+        tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)
+    assert tv1.tuner.playing == CNN_A
+    tv1.close()
+
+
+def test_a_copy_that_sends_nothing_leaves_the_channel_where_it_was(two_playlists, fake, monkeypatch):
+    from tunerbox import db
+    from tunerbox.connections import Full
+    a, b = two_playlists
+    monkeypatch.setattr(tuner, "MOVE_WAIT", 0.5)
+    db.run("UPDATE streams SET url='fake:0:0:10' WHERE key='cnn-b'")          # B's CNN never sends anything
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    assert _read(tv1, 20000)
+    with pytest.raises(Full):
+        tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)
+    t = tv1.tuner
+    assert t.playing == CNN_A and t.source_id == a and t.moves == 0 and not t.ended
+    assert _read(tv1, 20000)                                        # still playing A's copy
+    tv1.close()
+
+
+def test_reading_file_details_never_moves_a_channel(two_playlists):
+    from tunerbox import connections
+    a, b = two_playlists
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    with pytest.raises(connections.Full):
+        connections.check(a, move=False)
+    assert tv1.tuner.playing == CNN_A
+    tv1.close()
+
+
+def test_a_moved_channel_is_still_found_by_its_original_address(two_playlists, fake):
+    """The guide (and a recording) still ask for A's address: they join the moved tuner, no new stream."""
+    a, b = two_playlists
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    assert _read(tv1, 20000)
+    tv2 = tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)         # CNN moves to B
+    assert tuner.sharing(CNN_A, "copy") and tuner.sharing(CNN_B, "copy")
+    tv3 = tuner.open_for(CNN_A, "tv3", "copy", source_id=a)          # A is full, but this joins CNN on B
+    rec = tuner.join(CNN_A, "copy", any_mode=True, name="dvr:5", source_id=a, take=True)
+    assert tv3.tuner is tv1.tuner and rec.tuner is tv1.tuner and len(fake) == 3
+    assert [r["url"] for r in tuner.running() if r["source_id"] == b] == [CNN_A]     # Setup › Tuners › Stop holds A's
+    for s in (tv1, tv2, tv3, rec):
+        s.close()
+
+
+def test_other_tunes_dont_wait_while_a_move_is_tried(two_playlists, fake, monkeypatch):
+    """Trying another playlist's copy can take seconds: it's done without connections.admit held."""
+    import threading
+
+    from tunerbox import connections
+    a, b = two_playlists
+    gate, held = threading.Event(), []
+    real = tuner.Tuner.move
+
+    def slow(self, url, source_id, wait=None):
+        held.append(connections._held())
+        free = connections.admit.acquire(timeout=2)                 # another tune could take it
+        if free:
+            connections.admit.release()
+        held.append(free)
+        assert connections.used(b) == 1                             # B's room is held for this try
+        gate.set()
+        return real(self, url, source_id, wait)
+    monkeypatch.setattr(tuner.Tuner, "move", slow)
+    tv1 = tuner.open_for(CNN_A, "tv1", "copy", source_id=a)
+    assert _read(tv1, 20000)
+    tv2 = tuner.open_for(ESPN_A, "tv2", "copy", source_id=a)
+    assert gate.is_set() and held == [False, True]
+    assert connections._reserved == {} and connections._moving == set()
+    assert connections.used(b) == 1 and tv1.tuner.source_id == b
+    tv1.close(); tv2.close()
+
+
+def test_the_old_copys_last_data_is_dropped_after_a_move(fake):
+    """A chunk the old ffmpeg's reader had in hand when the move swapped: its PAT/PMT and video PID
+    don't come back, and its end doesn't end the tuner."""
+    tv1 = tuner.join("fake:1000:0.05:0", "copy", name="tv1")
+    assert _read(tv1, 20000)
+    t = tv1.tuner
+    old = t.proc
+    data = None
+    while not data:
+        with t.lock:
+            data = next((c[2] for c in reversed(t.chunks) if c[2][1] & 0x40 and _pid(c[2]) == 0), None)
+        time.sleep(0.05)
+    assert t.move("fake:1000:0.05:1", None)
+    with t.lock:
+        t.psi, t.pmt_pids, t.video_pid = {}, set(), None             # as if the new copy sent no PAT yet
+    assert t._feed(data[:188], old) is False
+    assert t.psi == {} and t.video_pid is None
+    old.wait(5)
+    time.sleep(0.3)
+    assert not t.ended and _read(tv1, 20000)
+    tv1.close()

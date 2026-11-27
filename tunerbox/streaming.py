@@ -306,7 +306,7 @@ def start_cmd(cmd, client_id=None, raw_url="", label="", source_id=None):
         hls.stop_client(client_id)
     with connections.admit:
         if source_id is not None:
-            connections.check(source_id, client=client_id or "")
+            connections.check(source_id, client=client_id or "", move=False)
         log.info("Stream start for %s: %s", client_id or "-", label or _host(raw_url))
         proc = track(subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                       stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, bufsize=0))

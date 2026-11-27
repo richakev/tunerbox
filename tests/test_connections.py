@@ -67,7 +67,7 @@ def test_running_lists_tuner_viewers(monkeypatch):
     t.lock = threading.Lock()
     t.subs = [type("S", (), {"name": "tv1"})(), type("S", (), {"name": "dvr:4"})()]
     monkeypatch.setattr(tuner, "_tuners", [t])
-    assert tuner.running() == [{"id": id(t), "url": "u", "mode": "copy", "audio": "aac", "viewers": ["tv1", "dvr:4"], "source_id": 3,
+    assert tuner.running() == [{"id": id(t), "url": "u", "playing": "u", "mode": "copy", "audio": "aac", "viewers": ["tv1", "dvr:4"], "source_id": 3,
                                 "since": 123, "mb": 2.5}]
 
 

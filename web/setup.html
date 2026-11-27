@@ -324,6 +324,7 @@
         <label class="set-row"><span class="set-text"><b>Stream cache</b><small>Seconds of video buffered before playing. Each screen can change its own in the Menu.</small></span><select name="stream_buffer" data-num="1"><option value="0">Off (fastest changes)</option><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="20">20 seconds</option><option value="30">30 seconds</option><option value="60">60 seconds</option></select></label>
         <label class="set-row"><span class="set-text"><b>My Channels picture size</b></span><select name="media_resolution"><option value="1080">1080p (best)</option><option value="720">720p (less CPU)</option></select></label>
         <label class="set-row"><span class="set-text"><b>Tuners offered to Plex / Emby / Jellyfin</b><small>0 = automatic.</small></span><span class="unit-field"><input name="tuner_count" type="number" min="0" max="32"><em>tuners</em></span></label>
+        <label class="set-row"><span class="set-text"><b>Move channels to free a connection</b><small>When a playlist has no connection left, a channel another screen is watching on it moves to another playlist that has the same channel and a free connection, so the new channel can start. That screen keeps playing, with a jump of a second or two. Recordings are never moved.</small></span><input type="checkbox" class="toggle" name="conn_auto_move"></label>
       </div>
 
       <div class="set-group" data-cat="dvr" data-label="DVR">
