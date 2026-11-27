@@ -210,11 +210,11 @@ def quick_refresh(queue=False):
     return _run("refresh", job, queue)
 
 
-def rematch():
+def rematch(queue=False):
     def job():
         mapped, total = matcher.match_all(lambda d, t: _progress("Matching channels", d, t))
         return f"{mapped}/{total} lineup channels mapped"
-    return _run("match", job)
+    return _run("match", job, queue)
 
 
 def media_scan(cid=None):

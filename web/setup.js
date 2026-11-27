@@ -435,11 +435,15 @@ function srcStatus(s) {
 const stat = (n, what) => `<div><b>${(+n || 0).toLocaleString()}</b><span>${what}</span></div>`;
 loaders.sources = async () => {
   const list = srcList = await api("/api/sources");
-  $("src-list").innerHTML = list.length ? list.map((s) => {
+  const ranked = list.length > 1;                   // the order only matters with two or more playlists
+  $("src-order-hint").classList.toggle("hidden", !ranked);
+  $("src-list").innerHTML = list.length ? list.map((s, i) => {
     const hd = s.type === "hdhomerun";
+    const move = (a, label, title, off) => `<button class="btn small src-move" data-a="${a}" title="${title}" aria-label="${title}" ${off ? "disabled" : ""}>${label}</button>`;
     return `<div class="card src-card${s.enabled ? "" : " off"}" data-id="${s.id}">
-      <div class="card-head"><div class="t" title="${esc(s.name)}">${esc(s.name)}</div>
-        <span class="tag">${srcKind(s)}</span>${srcAccount(s)?.trial ? '<span class="tag trial">Trial</span>' : ""}${s.enabled ? "" : '<span class="tag none">Disabled</span>'}</div>
+      <div class="card-head">${ranked ? `<span class="src-rank" title="Priority ${i + 1}: used before the playlists below it">${i + 1}</span>` : ""}<div class="t" title="${esc(s.name)}">${esc(s.name)}</div>
+        <span class="tag">${srcKind(s)}</span>${srcAccount(s)?.trial ? '<span class="tag trial">Trial</span>' : ""}${s.enabled ? "" : '<span class="tag none">Disabled</span>'}
+        ${ranked ? move("up", "↑", "Move up (used first)", i === 0) + move("down", "↓", "Move down", i === list.length - 1) : ""}</div>
       <div class="u" title="${esc(noPass(s.url))}">${esc(hostOf(s.url) || noPass(s.url))}${s.username ? ` · ${esc(s.username)}` : ""}</div>
       ${srcStatus(s)}${(() => { const a = srcAccount(s); return a && a.note ? `<div class="src-st exp-${a.level}" title="${esc(a.tip)}"><span class="dot ${a.level === "bad" ? "dead" : "warn"}"></span>${esc(a.note)}</div>` : ""; })()}
       <div class="src-stats">${stat(s.count, "channels")}${hd ? "" : stat(s.vod.movies, "movies") + stat(s.vod.series, "shows")}</div>
@@ -496,6 +500,15 @@ $("src-list").addEventListener("click", async (e) => {
   if (b.dataset.a === "edit") { openSrcDlg(srcList.find((s) => s.id === +id)); return; }
   if (b.dataset.a === "groups") { openGroups(+id); return; }
   if (b.dataset.a === "rescan") { b.disabled = true; b.textContent = "Rescanning…"; startJob("scan", `?source=${id}`); return; }
+  if (b.dataset.a === "up" || b.dataset.a === "down") {
+    const ids = srcList.map((s) => s.id), i = ids.indexOf(+id), j = i + (b.dataset.a === "up" ? -1 : 1);
+    if (j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    try {
+      const r = await api("/api/sources/order", { method: "PUT", body: { ids } });
+      if (r.job) { toast("Order saved. Matching channels again…"); pollJob(); }
+    } catch (err) { toast(err.message); }
+  }
   if (b.dataset.a === "del" && confirm("Delete this playlist?")) await api(`/api/sources/${id}`, { method: "DELETE" });
   if (b.dataset.a === "toggle") await api(`/api/sources/${id}`, { method: "PATCH", body: { enabled: b.textContent === "Enable" ? 1 : 0 } });
   loaders.sources();

@@ -92,6 +92,10 @@ table.grid { width: 100%; border-collapse: collapse; }
 /* playlist cards: name and type, where from, last scan, counts, settings, then the actions */
 .src-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
 .src-card .card-head .t { font-size: 17px; }
+.src-rank { flex: none; min-width: 22px; height: 22px; padding: 0 5px; border-radius: 11px; display: inline-flex; align-items: center;
+  justify-content: center; font-size: 12px; font-weight: 600; background: var(--c-fg-1a); }
+.src-move { flex: none; min-width: 26px; padding: 3px 6px; }
+.src-move:disabled { opacity: .35; cursor: default; }
 .src-card .u { margin: -6px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; word-break: normal; }
 .src-card.off > :not(.src-foot) { opacity: .5; }
 .src-st { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dim); min-width: 0; }

@@ -249,7 +249,7 @@ def load_streams():
     rows = db.rows("""SELECT s.key, s.name, s.norm, s.tvg_id, s.grp, s.status, s.url, s.logo,
                              s.source_id, src.name AS source_name
                       FROM streams s JOIN sources src ON src.id = s.source_id
-                      WHERE src.enabled = 1 ORDER BY src.id, s.rowid""")
+                      WHERE src.enabled = 1 ORDER BY src.priority, src.id, s.rowid""")
     return [r for r in rows if r["status"] != "dead" and r["norm"]]
 
 
@@ -269,9 +269,14 @@ def feed_order():
     return out
 
 
+# Bump when the matching rules change, so a refresh re-matches instead of keeping the old result.
+_MATCH_VERSION = "2"   # 2: ties go to the first playlist
+
+
 def _fingerprint(streams, lineup, existing, removed, order=None):
     """Everything the matching pass reads. Same fingerprint = same result, so the pass can be skipped."""
     h = hashlib.sha1()
+    h.update(_MATCH_VERSION.encode())
     h.update(repr((config.get("match_threshold", 86), config.get("network_fallback", True))).encode())
     h.update(repr(sorted((n, sorted(ks)) for n, ks in removed.items())).encode())
     h.update(repr(sorted((order or {}).items())).encode())
@@ -376,7 +381,10 @@ def match_all(progress=None, force=True):
             for si in call_idx.get(inf["call"], []):
                 cands[si] = max(cands.get(si, 0), 99)
             reason = "callsign"
-        scored = sorted(((adjust(sc, inf, streams[si]), si) for si, sc in cands.items()), reverse=True)
+        # best score first; on a tie the earlier stream wins, i.e. the first playlist (streams are in
+        # playlist order), not the last one
+        scored = sorted(((adjust(sc, inf, streams[si]), si) for si, sc in cands.items()),
+                        key=lambda p: (-p[0], p[1]))
         good = [(sc, si) for sc, si in scored if sc >= threshold]
         if not good and inf["network"] and config.get("network_fallback", True) and inf["call"] and inf["call"][1] == 1:
             for suf in NET_SUFFIX:
@@ -384,7 +392,7 @@ def match_all(progress=None, force=True):
                     sc = adjust(80, inf, streams[si])
                     if sc >= 60:
                         good.append((sc, si))
-            good.sort(reverse=True)
+            good.sort(key=lambda p: (-p[0], p[1]))
             reason = f"{inf['network'].upper()} network feed"
         # distinct URLs only
         picked, urls, skip = [], set(), removed.get(num, ())
@@ -456,8 +464,11 @@ def rebuild_extras(streams=None):
     taken = {e["number"] for e in existing.values()}
     lineup_nums = {r["number"] for r in db.rows("SELECT number FROM lineup")}
     nxt = max([start - 1] + [n for n in taken if n >= start]) + 1
+    src_rank = {}                                   # playlist -> its place in the priority order
+    for s in streams:
+        src_rank.setdefault(s["source_id"], len(src_rank))
     new = sorted((s for k, s in wanted.items() if k not in existing),
-                 key=lambda s: (s["source_id"], (s["grp"] or "~").lower(), s["norm"]))
+                 key=lambda s: (src_rank[s["source_id"]], (s["grp"] or "~").lower(), s["norm"]))
     with db.conn() as c:
         c.execute("UPDATE extras SET active=0")
         c.executemany("UPDATE extras SET active=1 WHERE stream_key=?", [(k,) for k in wanted if k in existing])
@@ -533,4 +544,4 @@ def load_streams_all():
     return db.rows("""SELECT s.key, s.name, s.norm, s.tvg_id, s.grp, s.status, s.logo, s.source_id,
                              src.name AS source_name
                       FROM streams s JOIN sources src ON src.id = s.source_id
-                      WHERE src.enabled = 1 ORDER BY src.id, s.rowid""")
+                      WHERE src.enabled = 1 ORDER BY src.priority, src.id, s.rowid""")

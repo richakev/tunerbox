@@ -1,4 +1,6 @@
 """Setup › Channel lineup: see every feed matched to a channel and remove the wrong ones for good."""
+import json
+
 from fastapi.testclient import TestClient
 
 from tunerbox import api, db, matcher, sources
@@ -140,3 +142,55 @@ def test_feeds_on_a_switched_off_playlist_are_left_out(monkeypatch):
     assert [f["key"] for f in _ch(c)["feeds"]] == shown[::-1]
     db.run("UPDATE sources SET enabled=1 WHERE id=?", (sid,))     # switched back on: it's still there, last
     assert [f["key"] for f in _ch(c)["feeds"]] == shown[::-1] + [off]
+
+
+def _three_playlists_with_cnn(monkeypatch):
+    db.run("INSERT INTO lineup(number, name) VALUES (?,?)", (202, "Cable News Network"))
+    sids = []
+    for n in ("first", "second", "third"):
+        sid = sources.add_source(n, "m3u", f"http://{n}/list.m3u")
+        monkeypatch.setattr(sources, "fetch_m3u", lambda src, n=n: ([{"name": "CNN HD", "url": f"http://{n}/cnn",
+                                                                       "tvg_id": "", "logo": "", "grp": "News"}], ""))
+        sources.refresh_source(db.one("SELECT * FROM sources WHERE id=?", (sid,)))
+        sids.append(sid)
+    matcher.match_all()
+    return sids
+
+
+def _feed_playlists():
+    m = db.one("SELECT stream_key, alt_keys FROM mappings WHERE number=202")
+    return [int(k.split(":")[0]) for k in [m["stream_key"]] + json.loads(m["alt_keys"])]
+
+
+def test_identical_feeds_on_several_playlists_default_to_the_first_playlist(monkeypatch):
+    """Same name and score on every playlist: the first playlist's feed is the main one, the rest are backups
+    in playlist order (it used to be the last playlist's)."""
+    sids = _three_playlists_with_cnn(monkeypatch)
+    assert _feed_playlists() == sids
+
+
+def test_reordering_playlists_changes_which_feed_is_main(monkeypatch):
+    sids = _three_playlists_with_cnn(monkeypatch)
+    monkeypatch.setattr(api.jobs, "rematch", lambda queue=False: matcher.match_all())
+    c = TestClient(api.app)
+    want = [sids[2], sids[0], sids[1]]
+    assert c.put("/api/sources/order", json={"ids": want}).json()["ok"]
+    assert [s["id"] for s in c.get("/api/sources").json()] == want      # Setup lists them in that order
+    assert _feed_playlists() == want
+    matcher.match_all(force=False)                                      # and a later refresh keeps it
+    assert _feed_playlists() == want
+
+
+def test_playlist_order_must_name_every_playlist(monkeypatch):
+    sids = _three_playlists_with_cnn(monkeypatch)
+    c = TestClient(api.app)
+    for bad in ([sids[0], sids[1]], sids + [999], [sids[0], sids[0], sids[1]], "x", [str(i) for i in sids]):
+        assert c.put("/api/sources/order", json={"ids": bad}).status_code == 400
+    assert [s["id"] for s in c.get("/api/sources").json()] == sids
+
+
+def test_a_new_playlist_goes_after_reordered_ones(monkeypatch):
+    sids = _three_playlists_with_cnn(monkeypatch)
+    sources.set_order(sids[::-1])
+    new = sources.add_source("fourth", "m3u", "http://fourth/list.m3u")
+    assert [s["id"] for s in TestClient(api.app).get("/api/sources").json()] == sids[::-1] + [new]

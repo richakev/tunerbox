@@ -626,7 +626,7 @@ def api_extras_bulk(group: str = Body(...), enabled: bool = Body(...)):
 # ------------------------------------------------------------------ sources
 @app.get("/api/sources")
 def api_sources():
-    out = db.rows("SELECT * FROM sources ORDER BY id")
+    out = db.rows(f"SELECT * FROM sources ORDER BY {sources.ORDER}")
     for s in out:
         s["password"] = "••••" if s["password"] else ""
         s["count"] = db.one("SELECT count(*) n FROM streams WHERE source_id=?", (s["id"],))["n"]
@@ -705,6 +705,17 @@ def api_import_sources(request: Request, data: dict = Body(...)):
     if r["added"] or r["updated"]:
         r["job"] = "scan" if jobs.scan(queue=True) else ""        # read the new / changed playlists
     return r
+
+
+@app.put("/api/sources/order")
+def api_source_order(data: dict = Body(...)):
+    """Setup › Playlists ↑/↓: the playlists in priority order ({"ids": [...]}, every playlist, first first).
+    When playlists carry an equally good feed for a channel, the first playlist's is used, so match again."""
+    ids = data.get("ids") if isinstance(data, dict) else None
+    if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids) or not sources.set_order(ids):
+        raise HTTPException(400, "Send every playlist's id, in the order wanted")
+    guide.invalidate()
+    return {"ok": True, "job": "match" if jobs.rematch(queue=True) else ""}
 
 
 @app.get("/api/hdhomerun/discover")
@@ -1143,7 +1154,7 @@ def api_overview():
     """Setup › Overview: is everything working? One request for the health cards."""
     maps = db.rows("SELECT mode, score, reason, stream_key FROM mappings")
     weak = sum(1 for m in maps if m["stream_key"] and m["mode"] == "auto" and (m["score"] < 92 or "network" in (m["reason"] or "").lower()))
-    srcs = db.rows("SELECT id, name, type, enabled, status, updated_at FROM sources ORDER BY id")
+    srcs = db.rows(f"SELECT id, name, type, enabled, status, updated_at FROM sources ORDER BY {sources.ORDER}")
     for s in srcs:
         s["count"] = db.one("SELECT count(*) n FROM streams WHERE source_id=?", (s["id"],))["n"]
     gn = config.get("gracenote") or {}

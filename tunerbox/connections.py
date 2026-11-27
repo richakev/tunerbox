@@ -246,7 +246,7 @@ def in_use():
     out = _entries()
     for x in out:
         x.pop("_names", None)
-    sources = db.rows("SELECT * FROM sources ORDER BY id")
+    sources = db.rows("SELECT * FROM sources ORDER BY priority, id")
     used_ = {}
     for x in out:
         used_[x["source_id"]] = used_.get(x["source_id"], 0) + 1

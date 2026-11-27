@@ -619,6 +619,26 @@ def set_hidden_groups(source_id, names):
     return {"hidden": len(new), "newly_hidden": len(dropped), "shown_again": len(old - new)}
 
 
+# Playlists in priority order: Setup › Playlists lists them this way, and when two playlists carry an equally
+# good feed for a channel the first one is used. Priority 0 (every playlist before they were ever reordered)
+# falls back to the order they were added.
+ORDER = "priority, id"
+
+
+def next_priority():
+    return (db.one("SELECT max(priority) p FROM sources")["p"] or 0) + 1
+
+
+def set_order(ids):
+    """Save the playlist order (every playlist id, first first). False if the list isn't exactly the playlists."""
+    have = [r["id"] for r in db.rows(f"SELECT id FROM sources ORDER BY {ORDER}")]
+    if sorted(ids) != sorted(have):
+        return False
+    with db.conn() as c:
+        c.executemany("UPDATE sources SET priority=? WHERE id=?", [(i + 1, sid) for i, sid in enumerate(ids)])
+    return True
+
+
 def add_source(name, type_, url, username="", password="", exclude_groups="", xtream_format="ts", video_mode=None):
     if type_ == "m3u":
         xt = xtream_from_get_url(url)
@@ -631,9 +651,11 @@ def add_source(name, type_, url, username="", password="", exclude_groups="", xt
         name = name or d.get("FriendlyName") or "HDHomeRun"
         # antenna TV is MPEG-2, which browsers can't play: re-encode to H.264 unless told otherwise
         video_mode = video_mode or "h264"
-    return db.run("""INSERT INTO sources(name, type, url, username, password, exclude_groups, xtream_format, video_mode)
-                     VALUES (?,?,?,?,?,?,?,?)""",
-                  (name or url, type_, url, username, password, exclude_groups, xtream_format, video_mode or ""))
+    return db.run("""INSERT INTO sources(name, type, url, username, password, exclude_groups, xtream_format, video_mode,
+                                         priority)
+                     VALUES (?,?,?,?,?,?,?,?,?)""",
+                  (name or url, type_, url, username, password, exclude_groups, xtream_format, video_mode or "",
+                   next_priority()))
 
 
 # ---------------------------------------------------------------- backup / move to another PC
@@ -645,7 +667,7 @@ def export_sources():
     """Every playlist with its settings (logins included), for Setup > Playlists > Export."""
     from . import __version__
     out = []
-    for s in db.rows("SELECT * FROM sources ORDER BY id"):
+    for s in db.rows(f"SELECT * FROM sources ORDER BY {ORDER}"):
         out.append({"name": s["name"], "type": s["type"], "url": s["url"], "username": s["username"] or "",
                     "password": s["password"] or "", "enabled": bool(s["enabled"]),
                     "exclude_groups": s["exclude_groups"] or "", "hidden_groups": sorted(hidden_groups(s)),
@@ -711,6 +733,7 @@ def import_sources(data):
                    (*[row[k] for k in cols], cur["id"]))
             updated += 1
         else:
+            row["priority"] = next_priority()         # in the file's order, after the playlists already here
             cols = list(row)
             db.run(f"INSERT INTO sources({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                    tuple(row[k] for k in cols))
@@ -720,4 +743,4 @@ def import_sources(data):
 
 
 def enabled_sources():
-    return db.rows("SELECT * FROM sources WHERE enabled=1 ORDER BY id")
+    return db.rows(f"SELECT * FROM sources WHERE enabled=1 ORDER BY {ORDER}")
