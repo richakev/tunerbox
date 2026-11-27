@@ -5,7 +5,7 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
-from . import config, db, dvr, epg, guide, library, libtasks, lineup, matcher, media, probe, scoreboard, sources, sports, vod
+from . import config, db, dvr, epg, guide, library, libtasks, lineup, matcher, media, probe, scoreboard, sources, sports, timing, vod
 
 log = logging.getLogger("tunerbox.jobs")
 _lock = threading.Lock()
@@ -92,15 +92,20 @@ def scan(force_probe=False, queue=False, source_id=None):
     `source_id` (a playlist just added): only that one is read, with its On Demand and its streams checked;
     the others are left as they are. Matching and the guides still run for all, so its channels fit in."""
     def job():
+        log.info("Scan starting on %s", timing.machine())
+        steps = timing.Steps()
         lineup.load_csv()
         if epg.gracenote_ready() and db.get_meta("gn_lineup") != config.get("gracenote")["lineup_id"]:
             _progress("Loading your provider's channel numbers")
             epg.fetch_gracenote_channels()
+        steps.lap("lineup")
         srcs = [s for s in sources.enabled_sources() if source_id is None or s["id"] == source_id]
         for i, s in enumerate(srcs):
             _progress(f"Loading {s['name']}", i, len(srcs))
             sources.refresh_source(s)
+        steps.lap(f"{len(srcs)} playlist(s)")
         on_demand = vod.refresh_all(_progress, source_id) if vod.enabled() else ""
+        steps.lap("On Demand")
         probed = ""
         if config.get("probe_streams", True):
             cutoff = 0 if force_probe else int(time.time()) - 12 * 3600
@@ -113,16 +118,21 @@ def scan(force_probe=False, queue=False, source_id=None):
             if todo:
                 ok, n = probe.probe_streams(todo, lambda d, t: _progress("Checking streams", d, t))
                 probed = f", {ok}/{n} streams working"
+        steps.lap("checking streams")
         _progress("Matching channels")
         mapped, total = matcher.match_all(lambda d, t: _progress("Matching channels", d, t), force=False)
         guide.invalidate()
+        steps.lap("matching channels")
         if not db.get_meta("epg_updated"):
             epg.refresh_all(_progress)
         else:
             _progress("Online guides (XMLTV)")
             epg.fetch_xmltv(lambda d, t: _progress("Online guides (XMLTV)", d, t))
         guide.invalidate()
+        steps.lap("guides")
         dvr.apply_rules()
+        steps.lap("recording rules")
+        log.info("Scan%s took %s", f" of playlist {source_id}" if source_id else "", steps)
         if source_id is None:               # one new playlist isn't the full scan: that still runs on schedule
             db.set_meta("scan_updated", int(time.time()))
         n_extra = db.one("SELECT count(*) n FROM extras WHERE active=1")["n"]

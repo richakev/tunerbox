@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 import httpx
 
 from . import config, db
+from .timing import SLOW, Steps
 from .text import norm
 
 log = logging.getLogger("tunerbox.sources")
@@ -81,14 +82,22 @@ def xtream_from_get_url(url: str):
 
 def fetch_m3u(src):
     loc = src["url"].strip()
+    steps = Steps()
     if re.match(r"^https?://", loc, re.I):
         with client(120) as c:
             r = c.get(loc)
             r.raise_for_status()
+            size = len(r.content)
+            steps.lap(f"download {size / 1e6:.1f} MB")
             text = r.content.decode("utf-8", "replace")
     else:
         text = Path(loc).read_text(encoding="utf-8", errors="replace")
+        size = len(text)
+        steps.lap(f"reading the file {size / 1e6:.1f} MB")
     header, entries = parse_m3u(text)
+    steps.lap(f"reading {len(entries)} entries")
+    if steps.total() >= SLOW:
+        log.info("Playlist %s: %s", src["name"], steps)
     from . import catchup
     out = []
     for e in entries:
@@ -120,10 +129,21 @@ def xtream_api(src, action=None, timeout=120, **params):
     if action:
         p["action"] = action
     p.update(params)
+    steps = Steps()
     with client(timeout) as c:
-        r = c.get(f"{xtream_base(src)}/player_api.php", params=p)
-        r.raise_for_status()
-        return r.json()
+        with c.stream("GET", f"{xtream_base(src)}/player_api.php", params=p) as r:
+            steps.lap("provider answered")     # connecting, plus the provider putting the list together
+            r.raise_for_status()
+            body = r.read()
+        steps.lap(f"download {len(body) / 1e6:.1f} MB ({r.headers.get('content-encoding') or 'uncompressed'}, "
+                  f"{r.http_version})")
+        data = r.json()
+    steps.lap("reading the JSON")
+    if steps.total() >= SLOW:
+        # the big lists take a while: which part did tells a slow provider, a slow connection and a slow
+        # machine apart
+        log.info("Xtream %s from %s: %s", action or "login", src["name"], steps)
+    return data
 
 
 ACCOUNT_TTL = 12 * 3600         # Setup re-reads an Xtream account's expiry when it's older than this
@@ -462,6 +482,7 @@ def hdhr_moved(source_id, now=None):
 
 # ---------------------------------------------------------------- refresh
 def refresh_source(src):
+    steps = Steps()
     try:
         if src["type"] == "xtream":
             items, epg = fetch_xtream(src)
@@ -469,12 +490,16 @@ def refresh_source(src):
             items, epg = fetch_hdhomerun(src)
         else:
             items, epg = fetch_m3u(src)
+            steps.lap(f"fetching {len(items)} entries")
             from . import vod
             items = vod.take_m3u(src, items)        # video files are On Demand titles, not channels
+            steps.lap("On Demand files")
     except Exception as e:  # noqa: BLE001
         log.exception("Source %s failed", src["name"])
         db.run("UPDATE sources SET status=? WHERE id=?", (f"error: {e}", src["id"]))
         return 0
+    if src["type"] in ("xtream", "hdhomerun"):
+        steps.lap(f"fetching {len(items)} entries")
 
     rx = exclude_regex(src)
     hidden = hidden_groups(src)
@@ -486,6 +511,7 @@ def refresh_source(src):
     kept = [it for it in items if not left_out(it, hidden, rx)]
     keys = stream_keys(src, kept)
     seen = set(keys)
+    steps.lap("sorting")
     with db.conn() as c:
         c.execute("DELETE FROM source_groups WHERE source_id=?", (src["id"],))
         c.executemany("INSERT INTO source_groups(source_id, grp, count) VALUES (?,?,?)",
@@ -503,7 +529,8 @@ def refresh_source(src):
         c.execute("DELETE FROM streams WHERE source_id=? AND seen_at<?", (src["id"], now))
         c.execute("UPDATE sources SET status=?, epg_url=?, updated_at=? WHERE id=?",
                   (f"ok: {len(seen)} channels", epg or "", now, src["id"]))
-    log.info("Source %s: %d channels", src["name"], len(seen))
+    steps.lap("saving")
+    log.info("Source %s: %d channels in %s", src["name"], len(seen), steps)
     return len(seen)
 
 

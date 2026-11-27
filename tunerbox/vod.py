@@ -22,6 +22,7 @@ import httpx
 from rapidfuzz import fuzz, process
 
 from . import config, db, sources, streaming
+from .timing import Steps
 from .streaming import NO_WINDOW, ffmpeg_bin, input_args, play_args
 
 log = logging.getLogger("tunerbox.vod")
@@ -285,6 +286,7 @@ _BLANK = {"tag": "", "country": "", "xid": "", "category": "", "year": "", "rati
 def _store(src, kinds, rows):
     """Replace a playlist's titles of these kinds. Titles in unticked categories are kept but marked hidden.
     -> how many are shown."""
+    steps = Steps()
     hidden = hidden_cats(_source(src["id"]) or src)      # as it is now: it may have changed while the list downloaded
     now, counts, kept = int(time.time()), {}, []
     _label(rows)
@@ -293,21 +295,30 @@ def _store(src, kinds, rows):
         counts[k] = counts.get(k, 0) + 1
         kept.append({**_BLANK, **r, "search": fold(r["name"]), "source_id": src["id"], "seen_at": now,
                      "hidden": int(k in hidden)})
+    steps.lap("names")
     q = ",".join("?" * len(kinds))
     with db.conn() as c:
         c.execute(f"DELETE FROM vod_cats WHERE source_id=? AND kind IN ({q})", (src["id"], *kinds))
         c.executemany("INSERT OR REPLACE INTO vod_cats(source_id, kind, name, count) VALUES (?,?,?,?)",
                       [(src["id"], k, n, cnt) for (k, n), cnt in counts.items()])
+    steps.lap("categories")
     # a provider's catalogue can be a quarter of a million titles: written in batches so other writers (the
     # scoreboard, watch progress, recordings) get a turn in between instead of waiting out the lock. Titles
     # not seen this time (seen_at before now) go once all of them are in.
+    slowest = 0.0
     for i in range(0, len(kept), db.BATCH):
+        t = time.monotonic()
         with db.conn() as c:
             c.executemany(_UPSERT, kept[i:i + db.BATCH])
+        slowest = max(slowest, time.monotonic() - t)
+    steps.lap(f"saving in {-(-len(kept) // db.BATCH)} batches (slowest {slowest:.1f} s)")
     with db.conn() as c:
-        c.execute(f"DELETE FROM vod_titles WHERE source_id=? AND kind IN ({q}) AND seen_at<?", (src["id"], *kinds, now))
+        gone = c.execute(f"DELETE FROM vod_titles WHERE source_id=? AND kind IN ({q}) AND seen_at<?",
+                         (src["id"], *kinds, now)).rowcount
         c.execute("DELETE FROM vod_episodes WHERE title_id NOT IN (SELECT id FROM vod_titles)")
+    steps.lap(f"removing {gone} gone")
     _changed()
+    log.info("On Demand %s %s: saved %d titles in %s", src["name"], "+".join(kinds), len(kept), steps)
     return sum(1 for r in kept if not r["hidden"])
 
 
@@ -329,6 +340,7 @@ def take_m3u(src, items):
     db.set_meta(f"vod_files_{src['id']}", len(files))
     if not src.get("vod_movies"):
         return items
+    steps = Steps()
     rx, hide = sources.exclude_regex(src), sources.hidden_groups(src)
     titles, episodes = {}, []
     for it in files:
@@ -350,13 +362,16 @@ def take_m3u(src, items):
             tid = f"{src['id']}:m" + _hash(it["name"] + "|" + grp)
             titles[tid] = {"id": tid, "kind": "movie", "name": name, "year": year, "category": grp,
                            "poster": it["logo"] or "", "url": it["url"]}
+    steps.lap(f"sorting {len(files)} files")
     _store(src, KINDS, list(titles.values()))
+    steps.lap("saving titles")
     with db.conn() as c:
         c.execute("DELETE FROM vod_episodes WHERE title_id LIKE ?", (f"{src['id']}:s%",))
         c.executemany("""INSERT OR REPLACE INTO vod_episodes(id, title_id, season, episode, name, url)
                          SELECT :id, :title_id, :season, :episode, :name, :url
                          WHERE EXISTS (SELECT 1 FROM vod_titles WHERE id=:title_id)""", episodes)
-    log.info("Source %s: %d On Demand titles", src["name"], len(titles))
+    steps.lap(f"saving {len(episodes)} episodes")
+    log.info("Source %s: %d On Demand titles in %s", src["name"], len(titles), steps)
     return [it for it in items if not is_file(it["url"])]
 
 
@@ -376,11 +391,15 @@ def refresh_xtream(src, kinds=KINDS):
     """Read an Xtream login's movie and show lists (those turned on, of `kinds`). -> titles shown."""
     n = 0
     if src.get("vod_movies") and "movie" in kinds:
+        steps = Steps()
         cats = {str(c.get("category_id")): _s(c.get("category_name"))
                 for c in sources.xtream_api(src, "get_vod_categories") or []}
         _early_cats(src, "movie", cats.values())
+        steps.lap(f"{len(cats)} categories")
+        listed = sources.xtream_api(src, "get_vod_streams") or []
+        steps.lap(f"downloading {len(listed)} films")
         rows = []
-        for s in sources.xtream_api(src, "get_vod_streams") or []:
+        for s in listed:
             sid = s.get("stream_id")
             if sid is None or _adult(s):
                 continue
@@ -391,13 +410,22 @@ def refresh_xtream(src, kinds=KINDS):
                          "actors": _s(s.get("cast")), "director": _s(s.get("director")),
                          "poster": _s(s.get("stream_icon")), "ext": _s(s.get("container_extension")) or "mp4",
                          "added": _int(s.get("added"))})
+        del listed
+        steps.lap("reading them")
         n += _store(src, ("movie",), rows)
+        del rows
+        steps.lap("saving")
+        log.info("On Demand %s films: %s", src["name"], steps)
     if src.get("vod_series") and "series" in kinds:
+        steps = Steps()
         cats = {str(c.get("category_id")): _s(c.get("category_name"))
                 for c in sources.xtream_api(src, "get_series_categories") or []}
         _early_cats(src, "series", cats.values())
+        steps.lap(f"{len(cats)} categories")
+        listed = sources.xtream_api(src, "get_series") or []
+        steps.lap(f"downloading {len(listed)} shows")
         rows = []
-        for s in sources.xtream_api(src, "get_series") or []:
+        for s in listed:
             sid = s.get("series_id")
             if sid is None or _adult(s):
                 continue
@@ -408,7 +436,12 @@ def refresh_xtream(src, kinds=KINDS):
                          "rating": _s(s.get("rating")), "genre": _s(s.get("genre")), "plot": _s(s.get("plot")),
                          "actors": _s(s.get("cast")), "director": _s(s.get("director")),
                          "poster": _s(s.get("cover")), "added": _int(s.get("last_modified"))})
+        del listed
+        steps.lap("reading them")
         n += _store(src, ("series",), rows)
+        del rows
+        steps.lap("saving")
+        log.info("On Demand %s shows: %s", src["name"], steps)
     return n
 
 
