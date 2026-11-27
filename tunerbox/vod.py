@@ -278,7 +278,23 @@ _UPSERT = """INSERT INTO vod_titles(id, source_id, kind, xid, name, category, ye
                plot=CASE WHEN excluded.plot!='' THEN excluded.plot ELSE vod_titles.plot END,
                actors=CASE WHEN excluded.actors!='' THEN excluded.actors ELSE vod_titles.actors END,
                director=CASE WHEN excluded.director!='' THEN excluded.director ELSE vod_titles.director END,
-               duration=CASE WHEN excluded.duration>0 THEN excluded.duration ELSE vod_titles.duration END"""
+               duration=CASE WHEN excluded.duration>0 THEN excluded.duration ELSE vod_titles.duration END
+             WHERE vod_titles.xid IS NOT excluded.xid OR vod_titles.name IS NOT excluded.name
+               OR vod_titles.category IS NOT excluded.category OR vod_titles.search IS NOT excluded.search
+               OR vod_titles.hidden IS NOT excluded.hidden OR vod_titles.tag IS NOT excluded.tag
+               OR vod_titles.country IS NOT excluded.country OR vod_titles.poster IS NOT excluded.poster
+               OR vod_titles.ext IS NOT excluded.ext OR vod_titles.url IS NOT excluded.url
+               OR vod_titles.added IS NOT excluded.added
+               OR (excluded.year!='' AND vod_titles.year IS NOT excluded.year)
+               OR (excluded.rating!='' AND vod_titles.rating IS NOT excluded.rating)
+               OR (excluded.genre!='' AND vod_titles.genre IS NOT excluded.genre)
+               OR (excluded.plot!='' AND vod_titles.plot IS NOT excluded.plot)
+               OR (excluded.actors!='' AND vod_titles.actors IS NOT excluded.actors)
+               OR (excluded.director!='' AND vod_titles.director IS NOT excluded.director)
+               OR (excluded.duration>0 AND vod_titles.duration IS NOT excluded.duration)"""
+# A title already saved is only rewritten when something about it changed (the WHERE): most refreshes
+# change a few hundred of a catalogue's titles, and writing the rest again is most of a slow disk's wait.
+# So seen_at is when a title was first saved or last changed, not when it was last listed.
 _BLANK = {"tag": "", "country": "", "xid": "", "category": "", "year": "", "rating": "", "genre": "", "plot": "", "actors": "", "director": "",
           "poster": "", "duration": 0, "ext": "", "url": "", "added": 0}
 
@@ -289,12 +305,16 @@ def _store(src, kinds, rows):
     steps = Steps()
     hidden = hidden_cats(_source(src["id"]) or src)      # as it is now: it may have changed while the list downloaded
     now, counts, kept = int(time.time()), {}, []
+    # a provider can list a title twice (the same stream_id, a different poster): only the last one is kept (it's
+    # the one that would end up saved anyway), so it isn't counted twice or written again on every refresh
+    rows = list({r["id"]: r for r in rows}.values())
     _label(rows)
     for r in rows:
         k = (r["kind"], r.get("category") or "")
         counts[k] = counts.get(k, 0) + 1
         kept.append({**_BLANK, **r, "search": fold(r["name"]), "source_id": src["id"], "seen_at": now,
                      "hidden": int(k in hidden)})
+    listed = {r["id"] for r in kept}
     steps.lap("names")
     q = ",".join("?" * len(kinds))
     with db.conn() as c:
@@ -303,20 +323,25 @@ def _store(src, kinds, rows):
                       [(src["id"], k, n, cnt) for (k, n), cnt in counts.items()])
     steps.lap("categories")
     # a provider's catalogue can be a quarter of a million titles: written in batches so other writers (the
-    # scoreboard, watch progress, recordings) get a turn in between instead of waiting out the lock. Titles
-    # not seen this time (seen_at before now) go once all of them are in.
-    slowest = 0.0
+    # scoreboard, watch progress, recordings) get a turn in between instead of waiting out the lock. Only new
+    # and changed titles are written (see _UPSERT). Titles the provider no longer lists go once all are in.
+    slowest, changed = 0.0, 0
     for i in range(0, len(kept), db.BATCH):
         t = time.monotonic()
         with db.conn() as c:
             c.executemany(_UPSERT, kept[i:i + db.BATCH])
+            changed += c.total_changes
         slowest = max(slowest, time.monotonic() - t)
-    steps.lap(f"saving in {-(-len(kept) // db.BATCH)} batches (slowest {slowest:.1f} s)")
-    with db.conn() as c:
-        gone = c.execute(f"DELETE FROM vod_titles WHERE source_id=? AND kind IN ({q}) AND seen_at<?",
-                         (src["id"], *kinds, now)).rowcount
-        c.execute("DELETE FROM vod_episodes WHERE title_id NOT IN (SELECT id FROM vod_titles)")
-    steps.lap(f"removing {gone} gone")
+    steps.lap(f"saving {changed} new or changed in {-(-len(kept) // db.BATCH)} batches (slowest {slowest:.1f} s)")
+    gone = [(r["id"],) for r in db.rows(f"SELECT id FROM vod_titles WHERE source_id=? AND kind IN ({q})",
+                                        (src["id"], *kinds)) if r["id"] not in listed]
+    for i in range(0, len(gone), db.BATCH):
+        with db.conn() as c:
+            c.executemany("DELETE FROM vod_titles WHERE id=?", gone[i:i + db.BATCH])
+    if gone:
+        with db.conn() as c:
+            c.execute("DELETE FROM vod_episodes WHERE title_id NOT IN (SELECT id FROM vod_titles)")
+    steps.lap(f"removing {len(gone)} gone")
     _changed()
     log.info("On Demand %s %s: saved %d titles in %s", src["name"], "+".join(kinds), len(kept), steps)
     return sum(1 for r in kept if not r["hidden"])
@@ -365,12 +390,24 @@ def take_m3u(src, items):
     steps.lap(f"sorting {len(files)} files")
     _store(src, KINDS, list(titles.values()))
     steps.lap("saving titles")
+    # as for the titles: only new and changed episodes are written, and those no longer listed removed. An episode
+    # listed twice (in HD and in 4K) keeps the last one, which is what saving both would leave.
+    episodes = list({e["id"]: e for e in episodes}.values())
+    listed = {e["id"] for e in episodes}
+    gone = [(r["id"],) for r in db.rows("SELECT id FROM vod_episodes WHERE title_id LIKE ?", (f"{src['id']}:s%",))
+            if r["id"] not in listed]
     with db.conn() as c:
-        c.execute("DELETE FROM vod_episodes WHERE title_id LIKE ?", (f"{src['id']}:s%",))
-        c.executemany("""INSERT OR REPLACE INTO vod_episodes(id, title_id, season, episode, name, url)
+        c.executemany("DELETE FROM vod_episodes WHERE id=?", gone)
+        c.executemany("""INSERT INTO vod_episodes(id, title_id, season, episode, name, url)
                          SELECT :id, :title_id, :season, :episode, :name, :url
-                         WHERE EXISTS (SELECT 1 FROM vod_titles WHERE id=:title_id)""", episodes)
-    steps.lap(f"saving {len(episodes)} episodes")
+                         WHERE EXISTS (SELECT 1 FROM vod_titles WHERE id=:title_id)
+                         ON CONFLICT(id) DO UPDATE SET title_id=excluded.title_id, season=excluded.season,
+                           episode=excluded.episode, name=excluded.name, url=excluded.url
+                         WHERE vod_episodes.title_id IS NOT excluded.title_id OR vod_episodes.season IS NOT excluded.season
+                           OR vod_episodes.episode IS NOT excluded.episode OR vod_episodes.name IS NOT excluded.name
+                           OR vod_episodes.url IS NOT excluded.url""", episodes)
+        changed = c.total_changes - len(gone)
+    steps.lap(f"saving {changed} new or changed of {len(episodes)} episodes, removing {len(gone)} gone")
     log.info("Source %s: %d On Demand titles in %s", src["name"], len(titles), steps)
     return [it for it in items if not is_file(it["url"])]
 

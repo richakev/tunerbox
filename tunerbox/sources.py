@@ -80,6 +80,14 @@ def xtream_from_get_url(url: str):
     return None
 
 
+def _size(size, r):
+    """'77.0 MB (gzip, 14.2 MB sent, HTTP/1.1)' for a log line: the list's size, what came over the network when
+    the provider compressed it (num_bytes_downloaded counts the bytes before they're unzipped), and how."""
+    enc = r.headers.get("content-encoding")
+    sent = f", {r.num_bytes_downloaded / 1e6:.1f} MB sent" if enc and enc != "identity" else ""
+    return f"{size / 1e6:.1f} MB ({enc or 'uncompressed'}{sent}, {r.http_version})"
+
+
 def fetch_m3u(src):
     loc = src["url"].strip()
     steps = Steps()
@@ -88,7 +96,7 @@ def fetch_m3u(src):
             r = c.get(loc)
             r.raise_for_status()
             size = len(r.content)
-            steps.lap(f"download {size / 1e6:.1f} MB")
+            steps.lap(f"download {_size(size, r)}")
             text = r.content.decode("utf-8", "replace")
     else:
         text = Path(loc).read_text(encoding="utf-8", errors="replace")
@@ -135,8 +143,7 @@ def xtream_api(src, action=None, timeout=120, **params):
             steps.lap("provider answered")     # connecting, plus the provider putting the list together
             r.raise_for_status()
             body = r.read()
-        steps.lap(f"download {len(body) / 1e6:.1f} MB ({r.headers.get('content-encoding') or 'uncompressed'}, "
-                  f"{r.http_version})")
+        steps.lap(f"download {_size(len(body), r)}")
         data = r.json()
     steps.lap("reading the JSON")
     if steps.total() >= SLOW:
