@@ -978,6 +978,7 @@ function vodKey(k) {
     case "d": openDvr(); break;
     case "m": openMenu(); break;
     case "u": toggleMute(); break;
+    case "c": toggleCaptions(); break;
     case "VolUp": setVolume(video.volume + 0.05); break;
     case "VolDown": setVolume(video.volume - 0.05); break;
     case "f": toggleFull(); break;

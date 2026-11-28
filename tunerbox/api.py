@@ -208,12 +208,14 @@ async def _live(request, row, client, mode, audio, buf, name=""):
                         cleanup=lambda: sub.close(wait=False))
 
 
-async def _hls(row, client, mode, buf, gone="No signal"):
+async def _hls(row, client, mode, buf, gone="No signal", cc=0):
     sid = await _started(lambda: hls.start(row["url"], client or None, mode or row.get("video_mode") or None,
                                            buf, source_id=row.get("source_id")))
     if not await hls.wait_ready(sid):
         raise HTTPException(502, gone)
-    return RedirectResponse(f"/api/hls/s/{sid}/index.m3u8", status_code=302)
+    # cc=1: a master playlist that declares the captions in the picture (CC1), for players that only show
+    # captions a playlist names (Roku). Without it, the media playlist as always.
+    return RedirectResponse(f"/api/hls/s/{sid}/{'master' if cc else 'index'}.m3u8", status_code=302)
 
 
 @app.get("/api/stream/{number}")
@@ -230,7 +232,7 @@ async def api_stream(request: Request, number: int, alt: int = 0, client: str = 
 
 
 @app.get("/api/hls/{number}")
-async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", buf: int = -1):
+async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", buf: int = -1, cc: int = 0):
     """Native-HLS players (iPad/iPhone Safari): start a session, then redirect to its playlist."""
     c = await anyio.to_thread.run_sync(guide.channel, number)
     if not c or not c["streams"]:
@@ -238,11 +240,16 @@ async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", b
     rows = await anyio.to_thread.run_sync(guide.stream_rows, c["streams"])
     if alt >= len(rows):
         raise HTTPException(404, "No more alternates")
-    return await _hls(rows[alt], client, mode, buf)
+    return await _hls(rows[alt], client, mode, buf, cc=cc)
 
 
 @app.get("/api/hls/s/{sid}/{name}")
 def api_hls_file(sid: str, name: str):
+    if name == "master.m3u8":
+        text = hls.master(sid)
+        if text is None:
+            raise HTTPException(404)
+        return Response(text, media_type="application/vnd.apple.mpegurl", headers={"Cache-Control": "no-cache"})
     p = hls.file(sid, name)
     if not p:
         raise HTTPException(404)
@@ -268,9 +275,9 @@ async def api_feed_stream(request: Request, key: str, client: str = "", mode: st
 
 
 @app.get("/api/feed/hls")
-async def api_feed_hls(key: str, client: str = "", mode: str = "", buf: int = -1):
+async def api_feed_hls(key: str, client: str = "", mode: str = "", buf: int = -1, cc: int = 0):
     r = await anyio.to_thread.run_sync(_feed_row, key)
-    return await _hls(r, client, mode, buf, "Not live")
+    return await _hls(r, client, mode, buf, "Not live", cc=cc)
 
 
 @app.get("/api/busy")

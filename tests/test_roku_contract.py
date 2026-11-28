@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 
-from tunerbox import api, db, gamestats, home, scoreboard, sports
+from tunerbox import api, db, gamestats, guide, hls, home, scoreboard, sports
 
 # (method, path) exactly as the Roku calls them; {x} marks a value the Roku fills in
 ROKU_ROUTES = [
@@ -17,6 +17,9 @@ ROKU_ROUTES = [
     ("GET", "/api/stream/{number}"),
     ("GET", "/api/channels/{number}/feeds"),
     ("GET", "/api/feed/stream"),
+    ("GET", "/api/hls/{number}"),        # ?cc=1: a master playlist naming the CC1 captions (MainScene.brs)
+    ("GET", "/api/feed/hls"),
+    ("GET", "/api/hls/s/{sid}/{name}"),
     ("GET", "/api/favorites"),
     ("POST", "/api/favorites"),
     ("GET", "/api/settings"),
@@ -306,3 +309,41 @@ def test_settings_have_the_sports_layout(client):
     # LoadTask.brs loadSports: "enhanced" picks SportsViewEnhanced; anything else (or none: an older
     # TunerBox) is the Basic SportsView
     assert client.get("/api/settings").json()["sports_layout"] == "basic"        # the default
+
+
+@pytest.fixture
+def hls_session(monkeypatch):
+    monkeypatch.setattr(guide, "channel", lambda n: {"number": n, "streams": ["k1"]})
+    monkeypatch.setattr(guide, "stream_rows", lambda keys: [{"url": "http://x/1", "source_id": None}])
+    monkeypatch.setattr(hls, "start", lambda *a, **k: "ab12")
+
+    async def ready(sid):
+        return True
+    monkeypatch.setattr(hls, "wait_ready", ready)
+    monkeypatch.setitem(hls._sessions, "ab12", {"last": 0, "client": ""})
+
+
+@pytest.mark.parametrize("path", ["/api/hls/5", "/api/feed/hls?key=k1"])
+def test_hls_redirects_to_the_media_playlist_by_default(client, hls_session, path):
+    # older Rokus (and pasiegel's) don't send cc: they must still get index.m3u8
+    r = client.get(path, follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/api/hls/s/ab12/index.m3u8"
+    sep = "&" if "?" in path else "?"
+    r = client.get(f"{path}{sep}cc=0", follow_redirects=False)
+    assert r.headers["location"] == "/api/hls/s/ab12/index.m3u8"
+
+
+@pytest.mark.parametrize("path", ["/api/hls/5?cc=1", "/api/feed/hls?key=k1&cc=1"])
+def test_hls_cc_redirects_to_a_master_naming_cc1(client, hls_session, path):
+    r = client.get(path, follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/api/hls/s/ab12/master.m3u8"
+    m = client.get(r.headers["location"])
+    assert m.status_code == 200 and m.headers["content-type"].startswith("application/vnd.apple.mpegurl")
+    text = m.text
+    assert text.startswith("#EXTM3U")
+    assert 'TYPE=CLOSED-CAPTIONS' in text and 'INSTREAM-ID="CC1"' in text and 'GROUP-ID="cc"' in text
+    assert 'CLOSED-CAPTIONS="cc"' in text and text.rstrip().endswith("index.m3u8")
+
+
+def test_hls_master_of_an_unknown_session_is_404(client):
+    assert client.get("/api/hls/s/nope/master.m3u8").status_code == 404

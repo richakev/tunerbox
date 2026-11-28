@@ -6,7 +6,7 @@ const ACTIONS = [
   ["Enter", "OK / Select"], ["Back", "Back / Exit"],
   ["ChannelUp", "Channel up / Page up"], ["ChannelDown", "Channel down / Page down"],
   ["g", "Guide"], ["i", "Info"], ["m", "Menu"], ["l", "Last channel"],
-  ["*", "Favorite: add / remove"], ["v", "Favorites guide / show all"], ["c", "Guide: filter by genre"],
+  ["*", "Favorite: add / remove"], ["v", "Favorites guide / show all"], ["c", "Closed captions / Guide: filter by genre"],
   ["h", "Home"], ["r", "Record"], ["d", "Recordings (DVR)"], ["/", "Search"], ["t", "Sports & Events"], ["x", "Game stats"], ["o", "On Demand"], ["w", "Multiview"],
   ["VolUp", "Volume up"], ["VolDown", "Volume down"], ["u", "Mute"],
   [" ", "Play / Pause"], ["s", "Stop playback"], ["f", "Full screen"], ["Power", "Power on / off"],
@@ -234,6 +234,7 @@ function handleKey(k, ev) {
       case "d": openDvr(); break;
       case "m": openMenu(); break;
       case "u": toggleMute(); break;
+      case "c": toggleCaptions(); break;
       case "VolUp": setVolume(video.volume + 0.05); break;
       case "VolDown": setVolume(video.volume - 0.05); break;
       case "f": toggleFull(); break;
@@ -270,6 +271,7 @@ function handleKey(k, ev) {
     case "/": openSearch(); break;
     case "t": openSports(); break;
     case "x": openStats(); break;
+    case "c": toggleCaptions(); break;
     case "o": openOD(); break;
     case "r": {
       if (!dvrOn()) { toast(DVR_OFF, 5000); break; }

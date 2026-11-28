@@ -186,6 +186,20 @@ def playlist(sid, path):
     return text
 
 
+def master(sid):
+    """A master playlist over this session's index.m3u8 that names the CEA-608 captions carried in the video
+    (CC1), so players that list only the captions a playlist declares (Roku) find them. None: no such session."""
+    s = _sessions.get(sid)
+    if not s:
+        return None
+    s["last"] = time.monotonic()
+    return ("#EXTM3U\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+            '#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="cc",NAME="English",LANGUAGE="en",INSTREAM-ID="CC1",'
+            "DEFAULT=YES,AUTOSELECT=YES\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=8000000,CLOSED-CAPTIONS="cc"\n'
+            "index.m3u8\n")
+
+
 def file(sid, name):
     s = _sessions.get(sid)
     if not s or not SAFE_FILE.match(name):
