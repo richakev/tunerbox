@@ -131,6 +131,7 @@ function hideRemote() { $("remote").classList.add("hidden"); $("rm-menu").classL
 let rmSeq = 0;
 async function remoteSync() {
   mvBarSync();
+  tsRemoteSync();
   const vol = $("rm-volume"), a = soundEl();
   vol.value = Math.round((a.muted ? 0 : a.volume) * 100);
   $("rm-mute").querySelector("use").setAttribute("href", a.muted || a.volume === 0 ? "#i-mute" : "#i-vol");
@@ -182,10 +183,10 @@ document.addEventListener("mousemove", () => {
   if (S.mode !== "off" && !top()) showRemote();
   hideRemoteLater(3000);
   // a movie, show or recording: its progress bar comes up with the controls (not over the info banner)
-  if (!top() && (S.mode === "vod" || S.mode === "playback") && $("banner").classList.contains("hidden")
+  if (!top() && (S.mode === "vod" || S.mode === "playback" || tsActive()) && $("banner").classList.contains("hidden")
       && Date.now() - pbMoveShown > 250) {
     pbMoveShown = Date.now();
-    if (S.mode === "vod") { if (S.vod && !S.vod.done) showVodBar(); } else showPlaybackBar();
+    if (S.mode === "vod") { if (S.vod && !S.vod.done) showVodBar(); } else if (S.mode === "live") tsShowBar(); else showPlaybackBar();
   }
   if (!$("playback").classList.contains("hidden") && !$("remote").classList.contains("hidden")) pbWithRemote();
 });
@@ -205,7 +206,7 @@ $("remote").addEventListener("click", (e) => {
   if (b.id === "rm-mv") { clearTimeout(idleTimer); hideRemote(); mvOpen(); return; }
   if (!b.dataset.k) return;
   // CH up/down, favorite and mute keep the controls up (flipping through channels); others put them away
-  const stay = ["ChannelUp", "ChannelDown", "*", "u"].includes(b.dataset.k);
+  const stay = ["ChannelUp", "ChannelDown", "*", "u", " ", "Rew", "FF"].includes(b.dataset.k);
   if (!stay) {
     clearTimeout(idleTimer); hideRemote();
     if (S.mode === "vod" || S.mode === "playback") $("playback").classList.add("hidden");    // the key below brings it back if it needs it

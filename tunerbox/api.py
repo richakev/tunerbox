@@ -208,9 +208,12 @@ async def _live(request, row, client, mode, audio, buf, name=""):
                         cleanup=lambda: sub.close(wait=False))
 
 
-async def _hls(row, client, mode, buf, gone="No signal", cc=0):
+async def _hls(row, client, mode, buf, gone="No signal", cc=0, timeshift=0):
+    # timeshift=<minutes> (richakev's fork; older servers ignore it and keep the short rolling playlist): a
+    # playlist that keeps that much of the channel (at most Setup's timeshift_minutes) to pause and rewind in
+    ts = hls.timeshift_minutes(timeshift) if timeshift > 0 else 0
     sid = await _started(lambda: hls.start(row["url"], client or None, mode or row.get("video_mode") or None,
-                                           buf, source_id=row.get("source_id")))
+                                           buf, source_id=row.get("source_id"), timeshift=ts))
     if not await hls.wait_ready(sid):
         raise HTTPException(502, gone)
     # cc=1: a master playlist that declares the captions in the picture (CC1), for players that only show
@@ -232,7 +235,8 @@ async def api_stream(request: Request, number: int, alt: int = 0, client: str = 
 
 
 @app.get("/api/hls/{number}")
-async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", buf: int = -1, cc: int = 0):
+async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", buf: int = -1, cc: int = 0,
+                  timeshift: int = 0):
     """Native-HLS players (iPad/iPhone Safari): start a session, then redirect to its playlist."""
     c = await anyio.to_thread.run_sync(guide.channel, number)
     if not c or not c["streams"]:
@@ -240,7 +244,15 @@ async def api_hls(number: int, alt: int = 0, client: str = "", mode: str = "", b
     rows = await anyio.to_thread.run_sync(guide.stream_rows, c["streams"])
     if alt >= len(rows):
         raise HTTPException(404, "No more alternates")
-    return await _hls(rows[alt], client, mode, buf, cc=cc)
+    return await _hls(rows[alt], client, mode, buf, cc=cc, timeshift=timeshift)
+
+
+@app.get("/api/timeshift")
+def api_timeshift(client: str = ""):
+    """Pausing and rewinding live TV (richakev's fork: a 404 tells a Roku the server can't). `minutes`: how far
+    back /api/hls/{n}?timeshift= and /api/feed/hls?timeshift= can keep (0: Setup has it off). With `client`,
+    also keeps that screen's live sessions going while it's paused, as a paused player asks for nothing."""
+    return {"minutes": hls.timeshift_minutes(), "kept": hls.keep_alive(client) if client else 0}
 
 
 @app.get("/api/hls/s/{sid}/{name}")
@@ -275,9 +287,9 @@ async def api_feed_stream(request: Request, key: str, client: str = "", mode: st
 
 
 @app.get("/api/feed/hls")
-async def api_feed_hls(key: str, client: str = "", mode: str = "", buf: int = -1, cc: int = 0):
+async def api_feed_hls(key: str, client: str = "", mode: str = "", buf: int = -1, cc: int = 0, timeshift: int = 0):
     r = await anyio.to_thread.run_sync(_feed_row, key)
-    return await _hls(r, client, mode, buf, "Not live", cc=cc)
+    return await _hls(r, client, mode, buf, "Not live", cc=cc, timeshift=timeshift)
 
 
 @app.get("/api/busy")

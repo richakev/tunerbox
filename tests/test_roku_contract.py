@@ -20,6 +20,8 @@ ROKU_ROUTES = [
     ("GET", "/api/hls/{number}"),        # ?cc=1: a master playlist naming the CC1 captions (MainScene.brs)
     ("GET", "/api/feed/hls"),
     ("GET", "/api/hls/s/{sid}/{name}"),
+    # pause / rewind live TV (richakev's fork only: a 404 keeps the Roku on its plain live stream)
+    ("GET", "/api/timeshift"),
     ("GET", "/api/favorites"),
     ("POST", "/api/favorites"),
     ("GET", "/api/settings"),
@@ -315,12 +317,14 @@ def test_settings_have_the_sports_layout(client):
 def hls_session(monkeypatch):
     monkeypatch.setattr(guide, "channel", lambda n: {"number": n, "streams": ["k1"]})
     monkeypatch.setattr(guide, "stream_rows", lambda keys: [{"url": "http://x/1", "source_id": None}])
-    monkeypatch.setattr(hls, "start", lambda *a, **k: "ab12")
+    calls = []
+    monkeypatch.setattr(hls, "start", lambda *a, **k: calls.append(k) or "ab12")
 
-    async def ready(sid):
+    async def ready(sid, **_):
         return True
     monkeypatch.setattr(hls, "wait_ready", ready)
     monkeypatch.setitem(hls._sessions, "ab12", {"last": 0, "client": ""})
+    return calls
 
 
 @pytest.mark.parametrize("path", ["/api/hls/5", "/api/feed/hls?key=k1"])
@@ -347,3 +351,46 @@ def test_hls_cc_redirects_to_a_master_naming_cc1(client, hls_session, path):
 
 def test_hls_master_of_an_unknown_session_is_404(client):
     assert client.get("/api/hls/s/nope/master.m3u8").status_code == 404
+
+
+def test_timeshift_says_how_far_back(client, monkeypatch):
+    # MainScene.brs tsProbe: a number of minutes; 0 (or a 404, from an older server) keeps live TV as it was
+    monkeypatch.setattr(hls.config, "get", lambda k, d=None: 30 if k == "timeshift_minutes" else d)
+    r = client.get("/api/timeshift")
+    assert r.status_code == 200 and r.json()["minutes"] == 30
+    monkeypatch.setattr(hls.config, "get", lambda k, d=None: 0 if k == "timeshift_minutes" else d)
+    assert client.get("/api/timeshift").json()["minutes"] == 0
+
+
+def test_timeshift_keeps_a_paused_screens_session(client, monkeypatch):
+    monkeypatch.setitem(hls._sessions, "zz99", {"last": 0, "client": "roku-1", "timeshift": 30})
+    r = client.get("/api/timeshift?client=roku-1")
+    assert r.json()["kept"] == 1 and hls._sessions["zz99"]["last"] > 0
+
+
+@pytest.mark.parametrize("path", ["/api/hls/5", "/api/feed/hls?key=k1"])
+def test_hls_without_timeshift_keeps_the_short_playlist(client, hls_session, path):
+    # pasiegel's Rokus and web UI never send timeshift
+    client.get(path, follow_redirects=False)
+    assert hls_session[-1]["timeshift"] == 0
+
+
+@pytest.mark.parametrize("path", ["/api/hls/5?timeshift=20&cc=1", "/api/feed/hls?key=k1&timeshift=20&cc=1"])
+def test_hls_timeshift_asks_for_a_long_playlist(client, hls_session, monkeypatch, path):
+    monkeypatch.setattr(hls.config, "get", lambda k, d=None: 30 if k == "timeshift_minutes" else d)
+    r = client.get(path, follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"] == "/api/hls/s/ab12/master.m3u8"
+    assert hls_session[-1]["timeshift"] == 20
+    client.get(path.replace("timeshift=20", "timeshift=999"), follow_redirects=False)
+    assert hls_session[-1]["timeshift"] == 30            # never more than Setup allows
+    monkeypatch.setattr(hls.config, "get", lambda k, d=None: 0 if k == "timeshift_minutes" else d)
+    client.get(path, follow_redirects=False)
+    assert hls_session[-1]["timeshift"] == 0             # Setup has it off: the usual playlist
+
+
+def test_timeshift_playlist_length():
+    def size(cmd):
+        return int(cmd[cmd.index("-hls_list_size") + 1])
+    assert size(hls._cmd(None)) == 8                      # unchanged without timeshift
+    assert size(hls._cmd(None, buffer=10)) == 13
+    assert size(hls._cmd(None, timeshift=30)) == 900      # 30 minutes of 2-second segments

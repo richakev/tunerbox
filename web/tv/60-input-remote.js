@@ -9,7 +9,7 @@ const ACTIONS = [
   ["*", "Favorite: add / remove"], ["v", "Favorites guide / show all"], ["c", "Closed captions / Guide: filter by genre"],
   ["h", "Home"], ["r", "Record"], ["d", "Recordings (DVR)"], ["/", "Search"], ["t", "Sports & Events"], ["x", "Game stats"], ["o", "On Demand"], ["w", "Multiview"],
   ["VolUp", "Volume up"], ["VolDown", "Volume down"], ["u", "Mute"],
-  [" ", "Play / Pause"], ["s", "Stop playback"], ["f", "Full screen"], ["Power", "Power on / off"],
+  [" ", "Play / Pause"], ["Rew", "Rewind / skip back"], ["FF", "Fast-forward / skip ahead"], ["s", "Stop playback"], ["f", "Full screen"], ["Power", "Power on / off"],
   ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 0].map((n) => [String(n), `Number ${n}`]),
 ];
 const ACTION_LABEL = Object.fromEntries(ACTIONS);
@@ -32,6 +32,7 @@ const DEFAULT_BINDINGS = {
   "-": "VolDown", "_": "VolDown", AudioVolumeDown: "VolDown",
   u: "u", AudioVolumeMute: "u",
   " ": " ", MediaPlayPause: " ", MediaPlay: " ", MediaPause: " ",
+  MediaRewind: "Rew", ",": "Rew", MediaFastForward: "FF", ".": "FF",
   s: "s", MediaStop: "s",
   f: "f", F11: "f", Power: "Power", PowerOff: "Power", p: "Power",
   ...Object.fromEntries([0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => [String(n), String(n)])),
@@ -214,8 +215,8 @@ function handleKey(k, ev) {
   if (S.mode === "playback") {
     switch (k) {
       case " ": case "Enter": video.paused ? video.play() : video.pause(); showPlaybackBar(); break;
-      case "ArrowLeft": video.currentTime = Math.max(0, video.currentTime - 10); showPlaybackBar(); break;
-      case "ArrowRight": video.currentTime += 30; showPlaybackBar(); break;
+      case "ArrowLeft": case "Rew": video.currentTime = Math.max(0, video.currentTime - 10); showPlaybackBar(); break;
+      case "ArrowRight": case "FF": video.currentTime += 30; showPlaybackBar(); break;
       case "ChannelUp": video.currentTime = Math.max(0, video.currentTime - 300); showPlaybackBar(); break;
       case "ChannelDown": video.currentTime += 300; showPlaybackBar(); break;
       case "Back":
@@ -253,6 +254,7 @@ function handleKey(k, ev) {
   // live TV
   S.mv.add = 0; S.mv.vodAdd = 0;    // back on TV without picking one: not adding a tile any more
   if (mvOn() && mvKey(k)) return true;
+  if (tsKey(k)) return true;        // Space pauses, Rew / FF skip, when this channel can (11-timeshift.js)
   switch (k) {
     case "ArrowUp": case "ChannelUp": chStep(1); break;
     case "ArrowDown": case "ChannelDown": chStep(-1); break;

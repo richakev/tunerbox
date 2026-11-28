@@ -269,6 +269,8 @@ const MENU = [
     act: () => { closeMenu(); sleepDialog(); } },
   { get label() { const b = bufSecs(); return `Stream cache: ${b ? b + " seconds" : "Off"}${localStorage.getItem("tb.buffer") === null ? " (default)" : " (this screen)"}`; },
     act: () => { closeMenu(); bufferDialog(); } },
+  { needsTs: true, get label() { return `Pause live TV (Space): ${tsOwnOff() ? "Off" : `On, up to ${TS.min} min`} (this screen)`; },
+    act: () => { closeMenu(); tsToggleOwn(); } },
   { id: "sstats", get label() { return `Stream stats: ${ssOn() ? ssWhere() : "Off"} (this screen)`; },
     act: () => { toggleStreamStats(); renderMenu(menuShown.indexOf(MENU_SSTATS)); } },
   { id: "cc", get label() { return `Closed captions (C): ${CC.on ? "On" : "Off"} (this screen)`; },
@@ -304,7 +306,7 @@ function openMenu() {
   hideBanner();
   const t = S.mode === "vod" && S.vod && S.vod.tracks;
   const avOn = (e) => !e.av || (t && (e.av === true || (e.av === "audio" ? t.audio.length > 1 : t.subs.length > 0)));
-  const items = MENU.filter((e) => avOn(e) && !(e.catchup && !cuLive()) && !(e.liveAlts && (!liveAlts() || S.mv.focus > 1)) && !(isPhone() && e.notPhone) && !(e.needsHome && !homeEnabled()) && !(e.homeOff && homeEnabled()) && featOn(e));
+  const items = MENU.filter((e) => avOn(e) && !(e.catchup && !cuLive()) && !(e.liveAlts && (!liveAlts() || S.mv.focus > 1)) && !(isPhone() && e.notPhone) && !(e.needsHome && !homeEnabled()) && !(e.needsTs && !(TS.min > 0)) && !(e.homeOff && homeEnabled()) && featOn(e));
   menuShown = items.filter((e, i) => e.head === undefined || (items[i + 1] && items[i + 1].head === undefined));
   renderMenu();
   S.layer.push("menu"); $("menu").classList.remove("hidden", "two");
@@ -430,7 +432,8 @@ function showPlaybackBar() {
   $("playback").classList.remove("hidden");
   clearTimeout(pbTimer);
   pbTimer = setTimeout(function hide() {               // not while it's dragged or pointed at
-    if (S.mode === "playback" && pbHeld()) { pbTimer = setTimeout(hide, 1500); return; }
+    if ((S.mode === "playback" || tsActive()) && pbHeld()) { pbTimer = setTimeout(hide, 1500); return; }
+    if (tsActive() && video.paused) return;             // a paused live channel keeps its bar up
     $("playback").classList.add("hidden");
   }, 4000);
 }

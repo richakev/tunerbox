@@ -185,6 +185,7 @@ function play(ch, alt, onFail, again) {
   let done = false;
   const once = () => !done && (done = true);
   onFail = () => { if (once()) stoppedFromSetup(badge).then((s) => { if (!s) failed(); }); };
+  if (tsWanted() && !mvOn()) { tsPlay(ch, alt, onFail, failed, again, badge); return; }     // pausable (11-timeshift.js)
   if (useHls()) { playHls(ch, alt, onFail); return; }
   if (!window.mpegts || !mpegts.getFeatureList().mseLivePlayback) {
     showStatic(ch.number, "Playback not supported", "This browser can't play live video"); return;

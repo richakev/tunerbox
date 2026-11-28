@@ -918,16 +918,18 @@ let pbScrub = null;      // { at } seconds under the pointer while dragging
 function pbLength() {
   if (S.mode === "vod" && S.vod && !S.vod.done) return S.vod.dur || 0;
   if (S.mode === "playback") { const d = video.duration; return isFinite(d) ? d : 0; }
+  if (tsActive()) { const r = tsRange(); return r ? r.edge - r.start : 0; }     // live TV kept to pause in
   return 0;
 }
 function pbScrubAt(e) {
   const d = pbLength(), r = $("pb-seek").getBoundingClientRect();
   const f = Math.min(1, Math.max(0, (e.clientX - r.left) / (r.width || 1)));
   pbScrub = { at: f * d };
-  if (S.mode === "vod") showVodBar(); else showPlaybackBar();          // keeps the bar up while dragging
+  if (S.mode === "vod") showVodBar(); else if (tsActive()) tsShowBar(); else showPlaybackBar();     // keeps the bar up while dragging
   $("pb-progress").style.width = `${f * 100}%`;
   const tip = $("pb-tip");
-  tip.textContent = `${fmtDur(pbScrub.at)} / ${fmtDur(d)}`;
+  tip.textContent = S.mode === "live" ? (d - pbScrub.at < TS_EDGE ? "Live" : `${fmtDur(d - pbScrub.at)} behind live`)
+    : `${fmtDur(pbScrub.at)} / ${fmtDur(d)}`;
   tip.style.left = `${f * 100}%`; tip.classList.remove("hidden");
 }
 function pbScrubEnd(e, go) {
@@ -939,6 +941,7 @@ function pbScrubEnd(e, go) {
   if (!go || !s) { if (S.mode === "vod") drawVodBar(); return; }
   if (S.mode === "vod") vodSeekTo(s.at);
   else if (S.mode === "playback") { video.currentTime = Math.min(s.at, Math.max(0, pbLength() - 1)); showPlaybackBar(); }
+  else if (tsActive()) { const r = tsRange(); if (r) tsSeekTo(r.start + s.at); }
 }
 $("pb-seek").addEventListener("pointerdown", (e) => {
   if (!pbLength() || (e.pointerType === "mouse" && e.button !== 0)) return;
@@ -964,8 +967,8 @@ window.addEventListener("pagehide", vodSave);
 function vodKey(k) {
   switch (k) {
     case " ": case "Enter": vodPause(); break;
-    case "ArrowLeft": vodSeek(-10); break;
-    case "ArrowRight": vodSeek(30); break;
+    case "ArrowLeft": case "Rew": vodSeek(-10); break;
+    case "ArrowRight": case "FF": vodSeek(30); break;
     case "ChannelUp": vodSeek(-300, false); break;
     case "ChannelDown": vodSeek(300, false); break;
     case "Back": case "s": vodStop(); break;

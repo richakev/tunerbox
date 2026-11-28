@@ -127,6 +127,10 @@ DEFAULTS = {
     # Extra stream cache in seconds (0 = fastest channel changes). Each TV screen can override it
     # in its Menu. Also keeps a read-ahead buffer on the server so a slow Wi-Fi viewer never stalls the provider.
     "stream_buffer": 0,
+    # Pause, rewind and fast-forward live TV (timeshift): minutes of each live channel a screen that asks for
+    # it can go back (hls.py keeps that much under the data folder, about 40 MB a minute at 5 Mbps). 0 = off,
+    # the default, so a server keeps playing live TV as it always has until Setup turns it on.
+    "timeshift_minutes": 0,
     # Turn a TV screen off after this many hours without a button press (0 = never), and show a
     # screensaver this many minutes after it's off (0 = never). Neither happens while a recording
     # is running or a phone remote is open.
